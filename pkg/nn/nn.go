@@ -7,17 +7,9 @@ type Params map[string]Mat
 // matching Backward pass
 type Cache any
 
-type Forwarder interface {
-	Forward(x Mat) (out Mat, cache Cache)
-}
-
-type Backwarder interface {
-	Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads)
-}
-
 type Layer interface {
-	Forwarder
-	Backwarder
+	Forward(x Mat) (out Mat, cache Cache)
+	Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads)
 }
 
 type ParamLayer interface {
