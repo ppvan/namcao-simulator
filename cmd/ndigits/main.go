@@ -4,34 +4,40 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ppvan/gpt/pkg/nn"
+	"github.com/ppvan/gpt/pkg/core"
+	"github.com/ppvan/gpt/pkg/data"
+	"github.com/ppvan/gpt/pkg/mlp"
 )
 
 func main() {
-	data, err := nn.LoadCSV("cmd/ndigits/digits.csv", 64, false)
+	digits()
+}
+
+func digits() {
+	d, err := data.LoadCSV("cmd/ndigits/digits.csv", 64, false)
 	if err != nil {
 		panic(err)
 	}
-	data = data.Shuffle()
-	train, val, _ := data.Split(0.80, 0.20, 0)
+	d = d.Shuffle()
+	train, val, _ := d.Split(0.80, 0.20, 0)
 
-	model := nn.NewDense(
-		nn.NewLinear(64, 32),
-		nn.NewBatchNorm(32),
-		nn.NewLeakyReLU(0.02),
+	model := mlp.NewDense(
+		mlp.NewLinear(64, 32),
+		mlp.NewBatchNorm(32),
+		core.NewLeakyReLU(0.02),
 
-		nn.NewLinear(32, 64),
-		nn.NewBatchNorm(64),
-		nn.NewLeakyReLU(0.02),
+		mlp.NewLinear(32, 64),
+		mlp.NewBatchNorm(64),
+		core.NewLeakyReLU(0.02),
 
-		nn.NewLinear(64, 16),
-		nn.NewBatchNorm(16),
-		nn.NewLeakyReLU(0.02),
+		mlp.NewLinear(64, 16),
+		mlp.NewBatchNorm(16),
+		core.NewLeakyReLU(0.02),
 
-		nn.NewLinear(16, 10),
+		mlp.NewLinear(16, 10),
 	)
-	opt := nn.NewAdam(0.001, 0.9, 0.999, 1e-8)
-	net := nn.NewNetwork(model, nn.CrossEntropy(), opt)
+	opt := core.NewAdam(0.001, 0.9, 0.999, 1e-8)
+	net := mlp.NewNetwork(model, core.CrossEntropy(), opt)
 
 	epochs := 256
 	batchSize := 64

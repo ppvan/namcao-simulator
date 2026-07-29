@@ -2,10 +2,6 @@ package core
 
 import "math"
 
-type Cache any
-type Grads map[string]Mat
-type Params map[string]Mat
-
 type ReLU struct{}
 type reluCache struct {
 	x Mat

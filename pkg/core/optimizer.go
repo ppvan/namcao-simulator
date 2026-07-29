@@ -2,6 +2,16 @@ package core
 
 import "math"
 
+// A opaque type saved in forward and useful for backward pass. Extact type depend on the operation
+type Cache any
+
+// Gradient map return by backward pass
+type Grads map[string]Mat
+
+// Learnable param of a layer, exactly like Grads, just easy to reason in optimizer context.
+type Params map[string]Mat
+
+// A interface so Optimizer could update learn-able parameters without knowing about the layer.
 type Parameter interface {
 	Params() Params   // read current parameter values
 	SetParams(Params) // write updated parameter values back
