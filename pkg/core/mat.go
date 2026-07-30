@@ -9,12 +9,10 @@ import (
 )
 
 const (
-	tileM = 64  // rows tile
-	tileK = 256 // depth tile
+	tileM = 32
+	tileK = 32
 
-	// Below this many multiply-adds, a Dot runs on the calling
-	// goroutine: spawning workers costs more than the math.
-	parallelThreshold = 64 * 64 * 64
+	parallelThreshold = 128
 )
 
 type Mat struct {
@@ -23,17 +21,14 @@ type Mat struct {
 	Columns int
 }
 
-// at returns the flat index for element (r, c).
 func (mat Mat) at(r, c int) int {
 	return r*mat.Columns + c
 }
 
-// Get returns the element at row r, column c.
 func (mat Mat) Get(r, c int) float64 {
 	return mat.weights[mat.at(r, c)]
 }
 
-// Set assigns the element at row r, column c.
 func (mat Mat) Set(r, c int, v float64) {
 	mat.weights[mat.at(r, c)] = v
 }
@@ -54,9 +49,6 @@ func (mat Mat) Combine(other Mat, f func(a, b float64) float64) Mat {
 	}
 	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
-
-// Add, Sub, Hadamard use direct loops instead of Combine + closure:
-// the indirect call per element blocks inlining and vectorization.
 
 func (mat Mat) Add(other Mat) Mat {
 	mat.assertSameShape(other, "add")
@@ -87,11 +79,6 @@ func (mat Mat) Hadamard(other Mat) Mat {
 	}
 	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
-
-// In-place variants: mutate the receiver's backing array and return it
-// for chaining. Only use on freshly allocated intermediates (e.g. the
-// result of a Dot/Add/Apply), never on values that are still referenced
-// elsewhere, such as cached activations or parameters.
 
 func (mat Mat) AddInPlace(other Mat) Mat {
 	mat.assertSameShape(other, "add")
@@ -127,9 +114,6 @@ func (mat Mat) ApplyInPlace(fn func(float64) float64) Mat {
 	return mat
 }
 
-// HadamardApply returns mat ⊙ fn(other) in a single pass, without
-// materializing fn(other). Handy for gradient chains like
-// df ⊙ dSigmoid(f).
 func (mat Mat) HadamardApply(other Mat, fn func(float64) float64) Mat {
 	mat.assertSameShape(other, "hadamard")
 	result := make([]float64, len(mat.weights))
@@ -140,8 +124,6 @@ func (mat Mat) HadamardApply(other Mat, fn func(float64) float64) Mat {
 	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
-// MulAdd returns mat⊙b + c⊙d in a single pass (e.g. the LSTM cell
-// update f⊙cPrev + i⊙g).
 func (mat Mat) MulAdd(b, c, d Mat) Mat {
 	mat.assertSameShape(b, "muladd")
 	c.assertSameShape(d, "muladd")
@@ -165,45 +147,49 @@ func (mat Mat) Dot(other Mat) Mat {
 	return Mat{weights: result, Rows: m, Columns: p}
 }
 
-// dotInto computes result = a(m x n) · b(n x p), parallelizing across
-// row chunks when the problem is large enough to amortize goroutine
-// startup.
 func dotInto(a, b, result []float64, m, n, p int) {
-	if m*n*p <= parallelThreshold {
-		dotTiled(a, b, result, 0, m, n, p)
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers == 1 || m*n*p <= parallelThreshold {
+		dotTiled(a, b, result, 0, m, n, p, 0, p)
 		return
 	}
 
-	numWorkers := runtime.GOMAXPROCS(0)
-	// split rows [0, m) into numWorkers chunks, rounded up to a
-	// multiple of tileM so tiles aren't split across workers
-	chunk := (m + numWorkers - 1) / numWorkers
-	chunk = (chunk + tileM - 1) / tileM * tileM
-
 	var wg sync.WaitGroup
-	for rowStart := 0; rowStart < m; rowStart += chunk {
-		rowEnd := min(rowStart+chunk, m)
-		wg.Add(1)
-		go func(rowStart, rowEnd int) {
-			defer wg.Done()
-			dotTiled(a, b, result, rowStart, rowEnd, n, p)
-		}(rowStart, rowEnd)
+	if m >= numWorkers*4 || m >= p {
+
+		chunk := (m + numWorkers - 1) / numWorkers
+		for rs := 0; rs < m; rs += chunk {
+			re := min(rs+chunk, m)
+			wg.Add(1)
+			go func(rs, re int) {
+				defer wg.Done()
+				dotTiled(a, b, result, rs, re, n, p, 0, p)
+			}(rs, re)
+		}
+	} else {
+
+		chunk := (p + numWorkers - 1) / numWorkers
+		chunk = (chunk + 7) / 8 * 8
+		for cs := 0; cs < p; cs += chunk {
+			ce := min(cs+chunk, p)
+			wg.Add(1)
+			go func(cs, ce int) {
+				defer wg.Done()
+				dotTiled(a, b, result, 0, m, n, p, cs, ce)
+			}(cs, ce)
+		}
 	}
 	wg.Wait()
 }
 
-// dotTiled computes result[rowStart:rowEnd, :] using tiling on i and k,
-// with the k loop register-blocked by 4: each pass over the output row
-// folds in four rows of b, so result traffic drops 4x versus a plain
-// saxpy loop.
-func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p int) {
+func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p, colStart, colEnd int) {
 	for ii := rowStart; ii < rowEnd; ii += tileM {
 		iMax := min(ii+tileM, rowEnd)
 		for kk := 0; kk < n; kk += tileK {
 			kMax := min(kk+tileK, n)
 			for i := ii; i < iMax; i++ {
 				aRow := i * n
-				c := result[i*p : i*p+p]
+				c := result[i*p+colStart : i*p+colEnd]
 
 				k := kk
 				for ; k+3 < kMax; k += 4 {
@@ -211,17 +197,17 @@ func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p int) {
 					a1 := a[aRow+k+1]
 					a2 := a[aRow+k+2]
 					a3 := a[aRow+k+3]
-					b0 := b[(k+0)*p : (k+0)*p+p]
-					b1 := b[(k+1)*p : (k+1)*p+p]
-					b2 := b[(k+2)*p : (k+2)*p+p]
-					b3 := b[(k+3)*p : (k+3)*p+p]
+					b0 := b[(k+0)*p+colStart : (k+0)*p+colEnd]
+					b1 := b[(k+1)*p+colStart : (k+1)*p+colEnd]
+					b2 := b[(k+2)*p+colStart : (k+2)*p+colEnd]
+					b3 := b[(k+3)*p+colStart : (k+3)*p+colEnd]
 					for j := range c {
 						c[j] += a0*b0[j] + a1*b1[j] + a2*b2[j] + a3*b3[j]
 					}
 				}
 				for ; k < kMax; k++ {
 					aik := a[aRow+k]
-					bb := b[k*p : k*p+p]
+					bb := b[k*p+colStart : k*p+colEnd]
 					for j := range c {
 						c[j] += aik * bb[j]
 					}
@@ -231,10 +217,6 @@ func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p int) {
 	}
 }
 
-// DotT returns mat Â· otheráµ. Benchmarks showed a blocked transpose
-// followed by the tiled Dot kernel beats a direct row-dot kernel, so
-// this is a convenience wrapper that keeps gradient call sites clean:
-// dz.DotT(W) instead of dz.Dot(W.Transpose()).
 func (mat Mat) DotT(other Mat) Mat {
 	if mat.Columns != other.Columns {
 		panic(fmt.Sprintf("incompatible matrices for A·Bᵀ: (%v x %v) and (%v x %v)ᵀ",
@@ -243,7 +225,6 @@ func (mat Mat) DotT(other Mat) Mat {
 	return mat.Dot(other.Transpose())
 }
 
-// TDot returns matᵀ · other, e.g. weight gradients x.TDot(dz).
 func (mat Mat) TDot(other Mat) Mat {
 	if mat.Rows != other.Rows {
 		panic(fmt.Sprintf("incompatible matrices for Aᵀ·B: (%v x %v)ᵀ and (%v x %v)",
@@ -257,8 +238,6 @@ func (mat Mat) Transpose() Mat {
 	rows, cols := mat.Rows, mat.Columns
 	src := mat.weights
 
-	// blocked transpose: keeps both source rows and destination rows
-	// resident in cache instead of striding through all of result
 	const blk = 32
 	for ii := 0; ii < rows; ii += blk {
 		iMax := min(ii+blk, rows)
@@ -346,6 +325,54 @@ func (mat Mat) Slice(start, end int) Mat {
 	)
 
 	return result
+}
+
+func (mat Mat) SliceCols(start, end int) Mat {
+	if start < 0 || end > mat.Columns || start > end {
+		panic("invalid column slice range")
+	}
+	cols := end - start
+	result := make([]float64, mat.Rows*cols)
+	for i := 0; i < mat.Rows; i++ {
+		copy(result[i*cols:(i+1)*cols], mat.weights[i*mat.Columns+start:i*mat.Columns+end])
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: cols}
+}
+
+func HStack(ms ...Mat) Mat {
+	if len(ms) == 0 {
+		panic("HStack requires at least one matrix")
+	}
+	rows := ms[0].Rows
+	total := 0
+	for _, m := range ms {
+		if m.Rows != rows {
+			panic(fmt.Sprintf("HStack row mismatch: %v vs %v", rows, m.Rows))
+		}
+		total += m.Columns
+	}
+	result := make([]float64, rows*total)
+	off := 0
+	for _, m := range ms {
+		for i := 0; i < rows; i++ {
+			copy(result[i*total+off:i*total+off+m.Columns], m.weights[i*m.Columns:(i+1)*m.Columns])
+		}
+		off += m.Columns
+	}
+	return Mat{weights: result, Rows: rows, Columns: total}
+}
+
+func (mat Mat) ApplyColsInPlace(start, end int, fn func(float64) float64) Mat {
+	if start < 0 || end > mat.Columns || start > end {
+		panic("invalid column range")
+	}
+	for i := 0; i < mat.Rows; i++ {
+		row := mat.weights[i*mat.Columns+start : i*mat.Columns+end]
+		for j, v := range row {
+			row[j] = fn(v)
+		}
+	}
+	return mat
 }
 
 func (mat Mat) String() string {

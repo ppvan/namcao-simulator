@@ -18,10 +18,22 @@ func dTanh(y float64) float64 {
 	return 1 - y*y
 }
 
+// LSTMCell with fused gates: instead of 4 separate weight matrices per
+// input, the gates live side by side in single matrices, in the column
+// order f | i | o | g:
+//
+//	W (inputSize, 4h), U (hiddenSize, 4h), B (1, 4h)
+//
+// Each Step then runs 2 large matmuls instead of 8 small ones. This is
+// the key change for CPU utilization: BPTT is sequential over time
+// steps, so the only parallelism available is *inside* each matmul, and
+// a (batch x in)·(in x 4h) product gives the column-splitting Dot four
+// times more width to spread across cores, with a quarter of the
+// goroutine spawn/join cycles.
 type LSTMCell struct {
-	Wf, Wi, Wo, Wg core.Mat
-	Uf, Ui, Uo, Ug core.Mat
-	Bf, Bi, Bo, Bg core.Mat
+	W core.Mat // input weights,  (inputSize, 4*hiddenSize)
+	U core.Mat // hidden weights, (hiddenSize, 4*hiddenSize)
+	B core.Mat // biases,         (1, 4*hiddenSize)
 
 	hiddenSize int
 }
@@ -40,21 +52,25 @@ type lstmCellCache struct {
 }
 
 func NewLSTMCell(inputSize, hiddenSize int) *LSTMCell {
+	// initialize each gate block independently so the per-gate Xavier
+	// scale matches the previous separate-matrix layout; forget-gate
+	// bias starts at 1 as before
+	ones := core.NewZeroMat(1, hiddenSize).Apply(func(float64) float64 { return 1 })
+	zeros := core.NewZeroMat(1, hiddenSize)
 	return &LSTMCell{
-		Wf: core.XavierMat(inputSize, hiddenSize),
-		Wi: core.XavierMat(inputSize, hiddenSize),
-		Wo: core.XavierMat(inputSize, hiddenSize),
-		Wg: core.XavierMat(inputSize, hiddenSize),
-
-		Uf: core.XavierMat(hiddenSize, hiddenSize),
-		Ui: core.XavierMat(hiddenSize, hiddenSize),
-		Uo: core.XavierMat(hiddenSize, hiddenSize),
-		Ug: core.XavierMat(hiddenSize, hiddenSize),
-
-		Bf: core.NewZeroMat(1, hiddenSize).Apply(func(float64) float64 { return 1 }),
-		Bi: core.NewZeroMat(1, hiddenSize),
-		Bo: core.NewZeroMat(1, hiddenSize),
-		Bg: core.NewZeroMat(1, hiddenSize),
+		W: core.HStack(
+			core.XavierMat(inputSize, hiddenSize),
+			core.XavierMat(inputSize, hiddenSize),
+			core.XavierMat(inputSize, hiddenSize),
+			core.XavierMat(inputSize, hiddenSize),
+		),
+		U: core.HStack(
+			core.XavierMat(hiddenSize, hiddenSize),
+			core.XavierMat(hiddenSize, hiddenSize),
+			core.XavierMat(hiddenSize, hiddenSize),
+			core.XavierMat(hiddenSize, hiddenSize),
+		),
+		B: core.HStack(ones, zeros, zeros, zeros),
 
 		hiddenSize: hiddenSize,
 	}
@@ -69,23 +85,21 @@ func (c *LSTMCell) InitState(batch int) State {
 
 func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	hPrev, cPrev := prev[0], prev[1]
+	h := c.hiddenSize
 
-	// The results of Dot are fresh allocations, so it is safe to
-	// accumulate into them in place: each gate costs 2 matmuls plus a
-	// single pre-activation buffer instead of 4 allocations.
-	zf := x.Dot(c.Wf).AddInPlace(hPrev.Dot(c.Uf)).AddBiasInPlace(c.Bf)
-	zi := x.Dot(c.Wi).AddInPlace(hPrev.Dot(c.Ui)).AddBiasInPlace(c.Bi)
-	zo := x.Dot(c.Wo).AddInPlace(hPrev.Dot(c.Uo)).AddBiasInPlace(c.Bo)
-	zg := x.Dot(c.Wg).AddInPlace(hPrev.Dot(c.Ug)).AddBiasInPlace(c.Bg)
+	// all four gate pre-activations in two matmuls
+	z := x.Dot(c.W).AddInPlace(hPrev.Dot(c.U)).AddBiasInPlace(c.B)
 
-	// z buffers are not needed after activation, so activate in place.
-	f := zf.ApplyInPlace(sigmoid)
-	i := zi.ApplyInPlace(sigmoid)
-	o := zo.ApplyInPlace(sigmoid)
-	g := zg.ApplyInPlace(math.Tanh)
+	// sigmoid on the f|i|o blocks, tanh on the g block, in place
+	z.ApplyColsInPlace(0, 3*h, sigmoid)
+	z.ApplyColsInPlace(3*h, 4*h, math.Tanh)
 
-	// cNext = f⊙cPrev + i⊙g in one fused pass
-	cNext := f.MulAdd(cPrev, i, g)
+	f := z.SliceCols(0, h)
+	i := z.SliceCols(h, 2*h)
+	o := z.SliceCols(2*h, 3*h)
+	g := z.SliceCols(3*h, 4*h)
+
+	cNext := f.MulAdd(cPrev, i, g) // f⊙cPrev + i⊙g in one pass
 	tanhC := cNext.Apply(math.Tanh)
 	hNext := o.Hadamard(tanhC)
 
@@ -108,8 +122,6 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	dh, dcNext := dNext[0], dNext[1]
 
 	do := dh.Hadamard(cc.tanhC)
-	// dc = dcNext + dh⊙o⊙dTanh(tanhC); the Hadamard result is a fresh
-	// buffer, so fuse the dTanh factor and accumulate dcNext in place.
 	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, dTanh).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
@@ -117,57 +129,43 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	dg := dc.Hadamard(cc.i)
 	dcPrev := dc.Hadamard(cc.f)
 
-	// dz = dGate ⊙ activation'(gate), fused into one pass each
-	dzf := df.HadamardApply(cc.f, dSigmoid)
-	dzi := di.HadamardApply(cc.i, dSigmoid)
-	dzo := do.HadamardApply(cc.o, dSigmoid)
-	dzg := dg.HadamardApply(cc.g, dTanh)
+	// assemble all four gate gradients into one (batch, 4h) matrix so
+	// the input, hidden, and weight gradients are 4 large matmuls
+	// instead of 16 small ones
+	dz := core.HStack(
+		df.HadamardApply(cc.f, dSigmoid),
+		di.HadamardApply(cc.i, dSigmoid),
+		do.HadamardApply(cc.o, dSigmoid),
+		dg.HadamardApply(cc.g, dTanh),
+	)
 
-	// DotT computes dz·Wᵀ and TDot computes xᵀ·dz directly, so the
-	// eight per-step weight transposes are gone from the call sites,
-	// and the running sums accumulate in place.
-	dx = dzf.DotT(c.Wf).
-		AddInPlace(dzi.DotT(c.Wi)).
-		AddInPlace(dzo.DotT(c.Wo)).
-		AddInPlace(dzg.DotT(c.Wg))
-
-	dhPrev := dzf.DotT(c.Uf).
-		AddInPlace(dzi.DotT(c.Ui)).
-		AddInPlace(dzo.DotT(c.Uo)).
-		AddInPlace(dzg.DotT(c.Ug))
+	dx = dz.DotT(c.W)
+	dhPrev := dz.DotT(c.U)
 
 	grads = core.Grads{
-		"Wf": cc.x.TDot(dzf),
-		"Wi": cc.x.TDot(dzi),
-		"Wo": cc.x.TDot(dzo),
-		"Wg": cc.x.TDot(dzg),
-
-		"Uf": cc.hPrev.TDot(dzf),
-		"Ui": cc.hPrev.TDot(dzi),
-		"Uo": cc.hPrev.TDot(dzo),
-		"Ug": cc.hPrev.TDot(dzg),
-
-		"bf": sumRows(dzf),
-		"bi": sumRows(dzi),
-		"bo": sumRows(dzo),
-		"bg": sumRows(dzg),
+		"W": cc.x.TDot(dz),
+		"U": cc.hPrev.TDot(dz),
+		"b": dz.SumRows(),
 	}
 
 	return dx, State{dhPrev, dcPrev}, grads
 }
 
 func (c *LSTMCell) Params() core.Params {
-	return core.Params{
-		"Wf": c.Wf, "Wi": c.Wi, "Wo": c.Wo, "Wg": c.Wg,
-		"Uf": c.Uf, "Ui": c.Ui, "Uo": c.Uo, "Ug": c.Ug,
-		"bf": c.Bf, "bi": c.Bi, "bo": c.Bo, "bg": c.Bg,
-	}
+	return core.Params{"W": c.W, "U": c.U, "b": c.B}
 }
 
+// SetParams accepts either the fused layout ("W", "U", "b") or the
+// legacy per-gate layout ("Wf".."Wg", "Uf".."Ug", "bf".."bg"), so old
+// checkpoints keep loading; they are fused on the way in.
 func (c *LSTMCell) SetParams(p core.Params) {
-	c.Wf, c.Wi, c.Wo, c.Wg = p["Wf"], p["Wi"], p["Wo"], p["Wg"]
-	c.Uf, c.Ui, c.Uo, c.Ug = p["Uf"], p["Ui"], p["Uo"], p["Ug"]
-	c.Bf, c.Bi, c.Bo, c.Bg = p["bf"], p["bi"], p["bo"], p["bg"]
+	if w, ok := p["W"]; ok {
+		c.W, c.U, c.B = w, p["U"], p["b"]
+		return
+	}
+	c.W = core.HStack(p["Wf"], p["Wi"], p["Wo"], p["Wg"])
+	c.U = core.HStack(p["Uf"], p["Ui"], p["Uo"], p["Ug"])
+	c.B = core.HStack(p["bf"], p["bi"], p["bo"], p["bg"])
 }
 
 func NewCharLSTM(vocabSize, embedSize, hiddenSize int) *CharRNN {
