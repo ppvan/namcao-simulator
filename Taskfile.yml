@@ -4,14 +4,10 @@ version: "3"
 vars:
   BIN_DIR: bin
   BINS:
-    - bpe
     - logic_gates
     - ndigits
-    - avg
-    - edit_distance
-    - vocab
-    - first_number
-    - avg-lstm
+    - shakespeare
+    - shakespeare-lstm
     # - prime
 
 tasks:
@@ -38,17 +34,17 @@ tasks:
     generates:
       - "{{.BIN_DIR}}/{{.NAME}}.exe"
 
-  build:bpe:
+  build:shakespeare:
     cmds:
       - task: build:one
         vars:
-          NAME: bpe
-
-  build:first_number:
+          NAME: shakespeare
+  
+  build:shakespeare-lstm:
     cmds:
       - task: build:one
         vars:
-          NAME: first_number
+          NAME: shakespeare-lstm
 
   build:logic_gates:
     cmds:
@@ -61,12 +57,6 @@ tasks:
       - task: build:one
         vars:
           NAME: ndigits
-
-  build:avg-lstm:
-    cmds:
-      - task: build:one
-        vars:
-          NAME: avg-lstm
 
   run:
     desc: Run a command
