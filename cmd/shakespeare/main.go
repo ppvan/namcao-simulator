@@ -28,7 +28,7 @@ func main() {
 
 	cfg := rnn.TrainConfig{
 		SeqLen:      25,
-		Steps:       10000,
+		Steps:       20000,
 		ClipNorm:    5.0,
 		LogEvery:    100,
 		EvalEvery:   1000,

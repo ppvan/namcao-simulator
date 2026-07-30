@@ -2,14 +2,19 @@ package core
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 )
 
 const (
-	tileM = 64 // rows tile
-	tileK = 64 // depth tile
+	tileM = 64  // rows tile
+	tileK = 256 // depth tile
+
+	// Below this many multiply-adds, a Dot runs on the calling
+	// goroutine: spawning workers costs more than the math.
+	parallelThreshold = 64 * 64 * 64
 )
 
 type Mat struct {
@@ -33,32 +38,120 @@ func (mat Mat) Set(r, c int, v float64) {
 	mat.weights[mat.at(r, c)] = v
 }
 
-func (mat Mat) Combine(other Mat, f func(a, b float64) float64) Mat {
+func (mat Mat) assertSameShape(other Mat, op string) {
 	if mat.Rows != other.Rows || mat.Columns != other.Columns {
-		message := fmt.Sprintf("In-compatible matrix, can't combine (%v x %v) * (%v x %v)", mat.Rows, mat.Columns, other.Rows, other.Columns)
-		panic(message)
-	}
-	result := make([]float64, len(mat.weights))
-	for i := range mat.weights {
-		result[i] = f(mat.weights[i], other.weights[i])
-	}
-	return Mat{
-		weights: result,
-		Rows:    mat.Rows,
-		Columns: mat.Columns,
+		panic(fmt.Sprintf("incompatible matrices, can't %s (%v x %v) and (%v x %v)",
+			op, mat.Rows, mat.Columns, other.Rows, other.Columns))
 	}
 }
 
+func (mat Mat) Combine(other Mat, f func(a, b float64) float64) Mat {
+	mat.assertSameShape(other, "combine")
+	result := make([]float64, len(mat.weights))
+	b := other.weights
+	for i, v := range mat.weights {
+		result[i] = f(v, b[i])
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
+}
+
+// Add, Sub, Hadamard use direct loops instead of Combine + closure:
+// the indirect call per element blocks inlining and vectorization.
+
 func (mat Mat) Add(other Mat) Mat {
-	return mat.Combine(other, func(a, b float64) float64 { return a + b })
+	mat.assertSameShape(other, "add")
+	result := make([]float64, len(mat.weights))
+	b := other.weights
+	for i, v := range mat.weights {
+		result[i] = v + b[i]
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
 func (mat Mat) Sub(other Mat) Mat {
-	return mat.Combine(other, func(a, b float64) float64 { return a - b })
+	mat.assertSameShape(other, "sub")
+	result := make([]float64, len(mat.weights))
+	b := other.weights
+	for i, v := range mat.weights {
+		result[i] = v - b[i]
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
 func (mat Mat) Hadamard(other Mat) Mat {
-	return mat.Combine(other, func(a, b float64) float64 { return a * b })
+	mat.assertSameShape(other, "hadamard")
+	result := make([]float64, len(mat.weights))
+	b := other.weights
+	for i, v := range mat.weights {
+		result[i] = v * b[i]
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
+}
+
+// In-place variants: mutate the receiver's backing array and return it
+// for chaining. Only use on freshly allocated intermediates (e.g. the
+// result of a Dot/Add/Apply), never on values that are still referenced
+// elsewhere, such as cached activations or parameters.
+
+func (mat Mat) AddInPlace(other Mat) Mat {
+	mat.assertSameShape(other, "add")
+	b := other.weights
+	for i := range mat.weights {
+		mat.weights[i] += b[i]
+	}
+	return mat
+}
+
+func (mat Mat) SubInPlace(other Mat) Mat {
+	mat.assertSameShape(other, "sub")
+	b := other.weights
+	for i := range mat.weights {
+		mat.weights[i] -= b[i]
+	}
+	return mat
+}
+
+func (mat Mat) HadamardInPlace(other Mat) Mat {
+	mat.assertSameShape(other, "hadamard")
+	b := other.weights
+	for i := range mat.weights {
+		mat.weights[i] *= b[i]
+	}
+	return mat
+}
+
+func (mat Mat) ApplyInPlace(fn func(float64) float64) Mat {
+	for i, v := range mat.weights {
+		mat.weights[i] = fn(v)
+	}
+	return mat
+}
+
+// HadamardApply returns mat ⊙ fn(other) in a single pass, without
+// materializing fn(other). Handy for gradient chains like
+// df ⊙ dSigmoid(f).
+func (mat Mat) HadamardApply(other Mat, fn func(float64) float64) Mat {
+	mat.assertSameShape(other, "hadamard")
+	result := make([]float64, len(mat.weights))
+	b := other.weights
+	for i, v := range mat.weights {
+		result[i] = v * fn(b[i])
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
+}
+
+// MulAdd returns mat⊙b + c⊙d in a single pass (e.g. the LSTM cell
+// update f⊙cPrev + i⊙g).
+func (mat Mat) MulAdd(b, c, d Mat) Mat {
+	mat.assertSameShape(b, "muladd")
+	c.assertSameShape(d, "muladd")
+	mat.assertSameShape(c, "muladd")
+	result := make([]float64, len(mat.weights))
+	bw, cw, dw := b.weights, c.weights, d.weights
+	for i, v := range mat.weights {
+		result[i] = v*bw[i] + cw[i]*dw[i]
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
 func (mat Mat) Dot(other Mat) Mat {
@@ -68,21 +161,28 @@ func (mat Mat) Dot(other Mat) Mat {
 	}
 	m, n, p := mat.Rows, mat.Columns, other.Columns
 	result := make([]float64, m*p)
-	a := mat.weights
-	b := other.weights
+	dotInto(mat.weights, other.weights, result, m, n, p)
+	return Mat{weights: result, Rows: m, Columns: p}
+}
 
-	const numWorkers = 4
-	// split rows [0, m) into numWorkers chunks
+// dotInto computes result = a(m x n) · b(n x p), parallelizing across
+// row chunks when the problem is large enough to amortize goroutine
+// startup.
+func dotInto(a, b, result []float64, m, n, p int) {
+	if m*n*p <= parallelThreshold {
+		dotTiled(a, b, result, 0, m, n, p)
+		return
+	}
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	// split rows [0, m) into numWorkers chunks, rounded up to a
+	// multiple of tileM so tiles aren't split across workers
 	chunk := (m + numWorkers - 1) / numWorkers
+	chunk = (chunk + tileM - 1) / tileM * tileM
 
 	var wg sync.WaitGroup
-	for w := range numWorkers {
-		rowStart := w * chunk
+	for rowStart := 0; rowStart < m; rowStart += chunk {
 		rowEnd := min(rowStart+chunk, m)
-		if rowStart >= rowEnd {
-			continue
-		}
-
 		wg.Add(1)
 		go func(rowStart, rowEnd int) {
 			defer wg.Done()
@@ -90,43 +190,39 @@ func (mat Mat) Dot(other Mat) Mat {
 		}(rowStart, rowEnd)
 	}
 	wg.Wait()
-
-	return Mat{
-		weights: result,
-		Rows:    m,
-		Columns: p,
-	}
 }
 
-// dotTiled computes result[rowStart:rowEnd, :] using tiling on i and k.
+// dotTiled computes result[rowStart:rowEnd, :] using tiling on i and k,
+// with the k loop register-blocked by 4: each pass over the output row
+// folds in four rows of b, so result traffic drops 4x versus a plain
+// saxpy loop.
 func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p int) {
 	for ii := rowStart; ii < rowEnd; ii += tileM {
-		iMax := ii + tileM
-		if iMax > rowEnd {
-			iMax = rowEnd
-		}
+		iMax := min(ii+tileM, rowEnd)
 		for kk := 0; kk < n; kk += tileK {
-			kMax := kk + tileK
-			if kMax > n {
-				kMax = n
-			}
+			kMax := min(kk+tileK, n)
 			for i := ii; i < iMax; i++ {
 				aRow := i * n
-				cRow := i * p
-				c := result[cRow : cRow+p]
-				for k := kk; k < kMax; k++ {
-					aik := a[aRow+k]
-					bRow := k * p
-					bb := b[bRow : bRow+p]
+				c := result[i*p : i*p+p]
 
-					j := 0
-					for ; j+3 < p; j += 4 {
-						c[j+0] += aik * bb[j+0]
-						c[j+1] += aik * bb[j+1]
-						c[j+2] += aik * bb[j+2]
-						c[j+3] += aik * bb[j+3]
+				k := kk
+				for ; k+3 < kMax; k += 4 {
+					a0 := a[aRow+k]
+					a1 := a[aRow+k+1]
+					a2 := a[aRow+k+2]
+					a3 := a[aRow+k+3]
+					b0 := b[(k+0)*p : (k+0)*p+p]
+					b1 := b[(k+1)*p : (k+1)*p+p]
+					b2 := b[(k+2)*p : (k+2)*p+p]
+					b3 := b[(k+3)*p : (k+3)*p+p]
+					for j := range c {
+						c[j] += a0*b0[j] + a1*b1[j] + a2*b2[j] + a3*b3[j]
 					}
-					for ; j < p; j++ {
+				}
+				for ; k < kMax; k++ {
+					aik := a[aRow+k]
+					bb := b[k*p : k*p+p]
+					for j := range c {
 						c[j] += aik * bb[j]
 					}
 				}
@@ -135,24 +231,49 @@ func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p int) {
 	}
 }
 
+// DotT returns mat Â· otheráµ. Benchmarks showed a blocked transpose
+// followed by the tiled Dot kernel beats a direct row-dot kernel, so
+// this is a convenience wrapper that keeps gradient call sites clean:
+// dz.DotT(W) instead of dz.Dot(W.Transpose()).
+func (mat Mat) DotT(other Mat) Mat {
+	if mat.Columns != other.Columns {
+		panic(fmt.Sprintf("incompatible matrices for A·Bᵀ: (%v x %v) and (%v x %v)ᵀ",
+			mat.Rows, mat.Columns, other.Rows, other.Columns))
+	}
+	return mat.Dot(other.Transpose())
+}
+
+// TDot returns matᵀ · other, e.g. weight gradients x.TDot(dz).
+func (mat Mat) TDot(other Mat) Mat {
+	if mat.Rows != other.Rows {
+		panic(fmt.Sprintf("incompatible matrices for Aᵀ·B: (%v x %v)ᵀ and (%v x %v)",
+			mat.Rows, mat.Columns, other.Rows, other.Columns))
+	}
+	return mat.Transpose().Dot(other)
+}
+
 func (mat Mat) Transpose() Mat {
 	result := make([]float64, len(mat.weights))
-
 	rows, cols := mat.Rows, mat.Columns
 	src := mat.weights
 
-	for i := range rows {
-		rowOffset := i * cols
-		for j := range cols {
-			result[j*rows+i] = src[rowOffset+j]
+	// blocked transpose: keeps both source rows and destination rows
+	// resident in cache instead of striding through all of result
+	const blk = 32
+	for ii := 0; ii < rows; ii += blk {
+		iMax := min(ii+blk, rows)
+		for jj := 0; jj < cols; jj += blk {
+			jMax := min(jj+blk, cols)
+			for i := ii; i < iMax; i++ {
+				rowOffset := i * cols
+				for j := jj; j < jMax; j++ {
+					result[j*rows+i] = src[rowOffset+j]
+				}
+			}
 		}
 	}
 
-	return Mat{
-		weights: result,
-		Rows:    mat.Columns,
-		Columns: mat.Rows,
-	}
+	return Mat{weights: result, Rows: mat.Columns, Columns: mat.Rows}
 }
 
 func (mat Mat) Apply(fn func(float64) float64) Mat {
@@ -160,15 +281,27 @@ func (mat Mat) Apply(fn func(float64) float64) Mat {
 	for i, v := range mat.weights {
 		result[i] = fn(v)
 	}
-	return Mat{
-		weights: result,
-		Rows:    mat.Rows,
-		Columns: mat.Columns,
-	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
 func (mat Mat) Scale(s float64) Mat {
-	return mat.Apply(func(v float64) float64 { return v * s })
+	result := make([]float64, len(mat.weights))
+	for i, v := range mat.weights {
+		result[i] = v * s
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
+}
+
+func (mat Mat) SumRows() Mat {
+	cols := mat.Columns
+	result := make([]float64, cols)
+	for i := 0; i < mat.Rows; i++ {
+		row := mat.weights[i*cols : (i+1)*cols]
+		for j, v := range row {
+			result[j] += v
+		}
+	}
+	return Mat{weights: result, Rows: 1, Columns: cols}
 }
 
 func (mat Mat) Sum() float64 {
@@ -233,10 +366,6 @@ func (mat Mat) String() string {
 	return sb.String()
 }
 
-// Broadcast replicates a (1, C) row matrix into an (rows, C) matrix
-// using pure Dot: ones(rows,1) . self(1,C) -> (rows,C), where every
-// row of the result is a copy of the original row. Panics if mat is
-// not a single row.
 func (mat Mat) Broadcast(rows int) Mat {
 	if mat.Rows != 1 {
 		panic(fmt.Sprintf("Broadcast requires a (1, C) matrix, got (%v x %v)", mat.Rows, mat.Columns))
@@ -244,15 +373,45 @@ func (mat Mat) Broadcast(rows int) Mat {
 	if rows == 1 {
 		return mat
 	}
-	ones := NewZeroMat(rows, 1).Apply(func(float64) float64 { return 1 })
-	return ones.Dot(mat)
+	cols := mat.Columns
+	result := make([]float64, rows*cols)
+	for i := 0; i < rows; i++ {
+		copy(result[i*cols:(i+1)*cols], mat.weights)
+	}
+	return Mat{weights: result, Rows: rows, Columns: cols}
 }
 
-// AddBias adds a (1, C) bias row to every row of mat, broadcasting
-// via Broadcast + the existing (non-broadcasting) Add/Combine.
 func (mat Mat) AddBias(bias Mat) Mat {
-	if mat.Rows == bias.Rows {
-		return mat.Add(bias) // already same shape, e.g. batch=1
+	if bias.Rows != 1 || bias.Columns != mat.Columns {
+		if mat.Rows == bias.Rows && mat.Columns == bias.Columns {
+			return mat.Add(bias)
+		}
+		panic(fmt.Sprintf("AddBias requires a (1, %v) bias, got (%v x %v)", mat.Columns, bias.Rows, bias.Columns))
 	}
-	return mat.Add(bias.Broadcast(mat.Rows))
+	result := make([]float64, len(mat.weights))
+	cols := mat.Columns
+	bw := bias.weights
+	for i := 0; i < mat.Rows; i++ {
+		row := mat.weights[i*cols : (i+1)*cols]
+		out := result[i*cols : (i+1)*cols]
+		for j, v := range row {
+			out[j] = v + bw[j]
+		}
+	}
+	return Mat{weights: result, Rows: mat.Rows, Columns: cols}
+}
+
+func (mat Mat) AddBiasInPlace(bias Mat) Mat {
+	if bias.Rows != 1 || bias.Columns != mat.Columns {
+		panic(fmt.Sprintf("AddBias requires a (1, %v) bias, got (%v x %v)", mat.Columns, bias.Rows, bias.Columns))
+	}
+	cols := mat.Columns
+	bw := bias.weights
+	for i := 0; i < mat.Rows; i++ {
+		row := mat.weights[i*cols : (i+1)*cols]
+		for j := range row {
+			row[j] += bw[j]
+		}
+	}
+	return mat
 }

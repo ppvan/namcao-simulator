@@ -70,17 +70,22 @@ func (c *LSTMCell) InitState(batch int) State {
 func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	hPrev, cPrev := prev[0], prev[1]
 
-	zf := x.Dot(c.Wf).Add(hPrev.Dot(c.Uf)).AddBias(c.Bf)
-	zi := x.Dot(c.Wi).Add(hPrev.Dot(c.Ui)).AddBias(c.Bi)
-	zo := x.Dot(c.Wo).Add(hPrev.Dot(c.Uo)).AddBias(c.Bo)
-	zg := x.Dot(c.Wg).Add(hPrev.Dot(c.Ug)).AddBias(c.Bg)
+	// The results of Dot are fresh allocations, so it is safe to
+	// accumulate into them in place: each gate costs 2 matmuls plus a
+	// single pre-activation buffer instead of 4 allocations.
+	zf := x.Dot(c.Wf).AddInPlace(hPrev.Dot(c.Uf)).AddBiasInPlace(c.Bf)
+	zi := x.Dot(c.Wi).AddInPlace(hPrev.Dot(c.Ui)).AddBiasInPlace(c.Bi)
+	zo := x.Dot(c.Wo).AddInPlace(hPrev.Dot(c.Uo)).AddBiasInPlace(c.Bo)
+	zg := x.Dot(c.Wg).AddInPlace(hPrev.Dot(c.Ug)).AddBiasInPlace(c.Bg)
 
-	f := zf.Apply(sigmoid)
-	i := zi.Apply(sigmoid)
-	o := zo.Apply(sigmoid)
-	g := zg.Apply(math.Tanh)
+	// z buffers are not needed after activation, so activate in place.
+	f := zf.ApplyInPlace(sigmoid)
+	i := zi.ApplyInPlace(sigmoid)
+	o := zo.ApplyInPlace(sigmoid)
+	g := zg.ApplyInPlace(math.Tanh)
 
-	cNext := f.Hadamard(cPrev).Add(i.Hadamard(g))
+	// cNext = f⊙cPrev + i⊙g in one fused pass
+	cNext := f.MulAdd(cPrev, i, g)
 	tanhC := cNext.Apply(math.Tanh)
 	hNext := o.Hadamard(tanhC)
 
@@ -103,41 +108,44 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	dh, dcNext := dNext[0], dNext[1]
 
 	do := dh.Hadamard(cc.tanhC)
-	dc := dcNext.Add(dh.Hadamard(cc.o).Hadamard(cc.tanhC.Apply(dTanh)))
+	// dc = dcNext + dh⊙o⊙dTanh(tanhC); the Hadamard result is a fresh
+	// buffer, so fuse the dTanh factor and accumulate dcNext in place.
+	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, dTanh).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
 	di := dc.Hadamard(cc.g)
 	dg := dc.Hadamard(cc.i)
 	dcPrev := dc.Hadamard(cc.f)
 
-	dzf := df.Hadamard(cc.f.Apply(dSigmoid))
-	dzi := di.Hadamard(cc.i.Apply(dSigmoid))
-	dzo := do.Hadamard(cc.o.Apply(dSigmoid))
-	dzg := dg.Hadamard(cc.g.Apply(dTanh))
+	// dz = dGate ⊙ activation'(gate), fused into one pass each
+	dzf := df.HadamardApply(cc.f, dSigmoid)
+	dzi := di.HadamardApply(cc.i, dSigmoid)
+	dzo := do.HadamardApply(cc.o, dSigmoid)
+	dzg := dg.HadamardApply(cc.g, dTanh)
 
-	xT := cc.x.Transpose()
-	hT := cc.hPrev.Transpose()
+	// DotT computes dz·Wᵀ and TDot computes xᵀ·dz directly, so the
+	// eight per-step weight transposes are gone from the call sites,
+	// and the running sums accumulate in place.
+	dx = dzf.DotT(c.Wf).
+		AddInPlace(dzi.DotT(c.Wi)).
+		AddInPlace(dzo.DotT(c.Wo)).
+		AddInPlace(dzg.DotT(c.Wg))
 
-	dx = dzf.Dot(c.Wf.Transpose()).
-		Add(dzi.Dot(c.Wi.Transpose())).
-		Add(dzo.Dot(c.Wo.Transpose())).
-		Add(dzg.Dot(c.Wg.Transpose()))
-
-	dhPrev := dzf.Dot(c.Uf.Transpose()).
-		Add(dzi.Dot(c.Ui.Transpose())).
-		Add(dzo.Dot(c.Uo.Transpose())).
-		Add(dzg.Dot(c.Ug.Transpose()))
+	dhPrev := dzf.DotT(c.Uf).
+		AddInPlace(dzi.DotT(c.Ui)).
+		AddInPlace(dzo.DotT(c.Uo)).
+		AddInPlace(dzg.DotT(c.Ug))
 
 	grads = core.Grads{
-		"Wf": xT.Dot(dzf),
-		"Wi": xT.Dot(dzi),
-		"Wo": xT.Dot(dzo),
-		"Wg": xT.Dot(dzg),
+		"Wf": cc.x.TDot(dzf),
+		"Wi": cc.x.TDot(dzi),
+		"Wo": cc.x.TDot(dzo),
+		"Wg": cc.x.TDot(dzg),
 
-		"Uf": hT.Dot(dzf),
-		"Ui": hT.Dot(dzi),
-		"Uo": hT.Dot(dzo),
-		"Ug": hT.Dot(dzg),
+		"Uf": cc.hPrev.TDot(dzf),
+		"Ui": cc.hPrev.TDot(dzi),
+		"Uo": cc.hPrev.TDot(dzo),
+		"Ug": cc.hPrev.TDot(dzg),
 
 		"bf": sumRows(dzf),
 		"bi": sumRows(dzi),
