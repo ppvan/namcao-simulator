@@ -64,7 +64,7 @@ func ClipGrads(grads core.Grads, maxNorm float64) core.Grads {
 
 	var sumSq float64
 	for _, g := range grads {
-		sumSq += g.Hadamard(g).Sum()
+		sumSq += g.SumSquares()
 	}
 	norm := math.Sqrt(sumSq)
 
@@ -73,11 +73,10 @@ func ClipGrads(grads core.Grads, maxNorm float64) core.Grads {
 	}
 
 	scale := maxNorm / norm
-	clipped := make(core.Grads, len(grads))
-	for name, g := range grads {
-		clipped[name] = g.Scale(scale)
+	for _, g := range grads {
+		g.ScaleInPlace(scale)
 	}
-	return clipped
+	return grads
 }
 
 func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm float64) (loss float64, sFinal State, err error) {

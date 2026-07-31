@@ -8,6 +8,7 @@ vars:
     - ndigits
     - shakespeare
     - shakespeare-lstm
+    - profile
     # - prime
 
 tasks:

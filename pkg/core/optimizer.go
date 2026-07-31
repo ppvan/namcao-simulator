@@ -128,39 +128,22 @@ func (a *Adam) Update(name string, param, grad Mat) Mat {
 	m, ok := a.m[name]
 	if !ok {
 		m = NewZeroMat(grad.Rows, grad.Columns)
+		a.m[name] = m
 	}
 	v, ok := a.v[name]
 	if !ok {
 		v = NewZeroMat(grad.Rows, grad.Columns)
+		a.v[name] = v
 	}
 
 	a.t[name]++
 	t := a.t[name]
 
-	// first moment (mean of gradient)
-	m = m.Scale(a.Beta1).
-		Add(grad.Scale(1 - a.Beta1))
+	corr1 := 1 - math.Pow(a.Beta1, float64(t))
+	corr2 := 1 - math.Pow(a.Beta2, float64(t))
 
-	// second moment (uncentered variance of gradient)
-	grad2 := grad.Hadamard(grad)
-	v = v.Scale(a.Beta2).
-		Add(grad2.Scale(1 - a.Beta2))
-
-	a.m[name] = m
-	a.v[name] = v
-
-	// bias correction
-	biasCorr1 := 1 - math.Pow(a.Beta1, float64(t))
-	biasCorr2 := 1 - math.Pow(a.Beta2, float64(t))
-
-	mHat := m.Scale(1 / biasCorr1)
-	vHat := v.Scale(1 / biasCorr2)
-
-	// sqrt(vHat) + eps, inverted
-	denom := vHat.Apply(func(x float64) float64 {
-		return 1 / (math.Sqrt(x) + a.Epsilon)
-	})
-
-	update := mHat.Hadamard(denom)
-	return param.Sub(update.Scale(a.Rate))
+	// One fused pass over the parameter instead of twelve allocating ones.
+	// m and v are updated in place and kept across steps.
+	AdamStep(param, grad, m, v, a.Rate, a.Beta1, a.Beta2, a.Epsilon, corr1, corr2)
+	return param
 }

@@ -27,6 +27,7 @@ type Cell interface {
 	InitState(batch int) State
 	Step(x core.Mat, prev State) (next State, cache core.Cache)
 	BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPrev State, grads core.Grads)
+	BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State)
 	Params() core.Params
 	SetParams(core.Params)
 }
@@ -135,6 +136,23 @@ func (l *rnnLinear) SetParams(p core.Params) {
 	l.biases = p["b"]
 }
 
+func (c *RecurentCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State) {
+	cc := cache.(rnnCellCache)
+	dz := dNext[0].HadamardApply(cc.hNext, dTanh)
+	cc.x.TDotAccInto(dz, acc["Wx"])
+	cc.hPrev.TDotAccInto(dz, acc["Wh"])
+	dz.SumRowsInto(acc["Bh"])
+	dx = dz.DotT(c.Wx)
+	return dx, State{dz.DotT(c.Wh)}
+}
+
+func (l *rnnLinear) BackwardInto(cache core.Cache, dOut core.Mat, dW, dB core.Mat) core.Mat {
+	c := cache.(rnnLinearCache)
+	c.input.TDotAccInto(dOut, dW)
+	dOut.SumRowsInto(dB)
+	return dOut.DotT(l.weights)
+}
+
 type CharRNN struct {
 	Embed  *Embedding
 	Cell   Cell
@@ -219,19 +237,14 @@ func (m *CharRNN) BackwardSeq(cache core.Cache, dLogits []core.Mat) (grads core.
 	dState := m.Cell.InitState(batch)
 
 	for t := T - 1; t >= 0; t-- {
-		dh, outGrads := m.Output.Backward(sc.outCaches[t], dLogits[t])
-		addInto(dWy, outGrads["W"])
-		addInto(dBy, outGrads["b"])
+		dh := m.Output.BackwardInto(sc.outCaches[t], dLogits[t], dWy, dBy)
 
 		// dState[0] is either the fresh InitState buffer (first
 		// iteration) or the fresh dPrev returned by BackwardStep, so
 		// mutating it in place is safe and avoids a per-step copy.
 		dState[0] = dState[0].AddInPlace(dh)
 
-		dEmb, dPrev, cellGrads := m.Cell.BackwardStep(sc.cellCaches[t], dState)
-		for name, g := range cellGrads {
-			addInto(cellAcc[name], g)
-		}
+		dEmb, dPrev := m.Cell.BackwardStepInto(sc.cellCaches[t], dState, cellAcc)
 
 		m.Embed.AccumulateInto(dWemb, sc.embedCaches[t], dEmb)
 

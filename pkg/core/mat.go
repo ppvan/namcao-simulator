@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -12,7 +13,7 @@ const (
 	tileM = 32
 	tileK = 32
 
-	parallelThreshold = 128
+	parallelThreshold = 1 << 19
 )
 
 type Mat struct {
@@ -222,7 +223,32 @@ func (mat Mat) DotT(other Mat) Mat {
 		panic(fmt.Sprintf("incompatible matrices for A·Bᵀ: (%v x %v) and (%v x %v)ᵀ",
 			mat.Rows, mat.Columns, other.Rows, other.Columns))
 	}
-	return mat.Dot(other.Transpose())
+	m, n, q := mat.Rows, mat.Columns, other.Rows
+	result := make([]float64, m*q)
+	dotTInto(mat.weights, other.weights, result, m, n, q)
+	return Mat{weights: result, Rows: m, Columns: q}
+}
+
+func dotTInto(a, b, c []float64, m, n, q int) {
+	for i := 0; i < m; i++ {
+		arow := a[i*n : i*n+n]
+		crow := c[i*q : i*q+q]
+		for j := 0; j < q; j++ {
+			brow := b[j*n : j*n+n]
+			var s0, s1, s2, s3 float64
+			k := 0
+			for ; k+3 < n; k += 4 {
+				s0 += arow[k] * brow[k]
+				s1 += arow[k+1] * brow[k+1]
+				s2 += arow[k+2] * brow[k+2]
+				s3 += arow[k+3] * brow[k+3]
+			}
+			for ; k < n; k++ {
+				s0 += arow[k] * brow[k]
+			}
+			crow[j] = (s0 + s1) + (s2 + s3)
+		}
+	}
 }
 
 func (mat Mat) TDot(other Mat) Mat {
@@ -230,7 +256,44 @@ func (mat Mat) TDot(other Mat) Mat {
 		panic(fmt.Sprintf("incompatible matrices for Aᵀ·B: (%v x %v)ᵀ and (%v x %v)",
 			mat.Rows, mat.Columns, other.Rows, other.Columns))
 	}
-	return mat.Transpose().Dot(other)
+	result := NewZeroMat(mat.Columns, other.Columns)
+	tDotAccInto(mat.weights, other.weights, result.weights, mat.Rows, mat.Columns, other.Columns)
+	return result
+}
+
+// TDotAccInto computes dst += A^T . B in place.
+func (mat Mat) TDotAccInto(other, dst Mat) Mat {
+	tDotAccInto(mat.weights, other.weights, dst.weights, mat.Rows, mat.Columns, other.Columns)
+	return dst
+}
+
+// SumRowsInto accumulates the column sums of mat into dst (1,C).
+func (mat Mat) SumRowsInto(dst Mat) Mat {
+	cols := mat.Columns
+	for i := 0; i < mat.Rows; i++ {
+		row := mat.weights[i*cols : (i+1)*cols]
+		for j, v := range row {
+			dst.weights[j] += v
+		}
+	}
+	return dst
+}
+
+func tDotAccInto(a, b, c []float64, m, n, p int) {
+	for k := 0; k < m; k++ {
+		arow := a[k*n : k*n+n]
+		brow := b[k*p : k*p+p]
+		for i := 0; i < n; i++ {
+			aki := arow[i]
+			if aki == 0 {
+				continue
+			}
+			crow := c[i*p : i*p+p]
+			for j := range crow {
+				crow[j] += aki * brow[j]
+			}
+		}
+	}
 }
 
 func (mat Mat) Transpose() Mat {
@@ -441,4 +504,39 @@ func (mat Mat) AddBiasInPlace(bias Mat) Mat {
 		}
 	}
 	return mat
+}
+
+func (mat Mat) ScaleInPlace(s float64) Mat {
+	for i := range mat.weights {
+		mat.weights[i] *= s
+	}
+	return mat
+}
+
+// SumSquares returns the sum of squared elements [performance]
+func (mat Mat) SumSquares() float64 {
+	var s0, s1 float64
+	w := mat.weights
+	i := 0
+	for ; i+1 < len(w); i += 2 {
+		s0 += w[i] * w[i]
+		s1 += w[i+1] * w[i+1]
+	}
+	for ; i < len(w); i++ {
+		s0 += w[i] * w[i]
+	}
+	return s0 + s1
+}
+
+// AdamStep applies one fused Adam update to param in place[performance].
+func AdamStep(param, grad, m, v Mat, rate, b1, b2, eps, corr1, corr2 float64) {
+	p, g, mw, vw := param.weights, grad.weights, m.weights, v.weights
+	ob1, ob2 := 1-b1, 1-b2
+	for i := range p {
+		gi := g[i]
+		mi := b1*mw[i] + ob1*gi
+		vi := b2*vw[i] + ob2*gi*gi
+		mw[i], vw[i] = mi, vi
+		p[i] -= rate * (mi / corr1) / (math.Sqrt(vi/corr2) + eps)
+	}
 }

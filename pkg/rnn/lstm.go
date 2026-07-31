@@ -151,6 +151,39 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	return dx, State{dhPrev, dcPrev}, grads
 }
 
+// BackwardStepInto is BackwardStep with the weight gradients accumulated
+// straight into caller-owned buffers. At batch 1 the "U" gradient is a
+// (256,1024) rank-1 update: materialising it as a fresh matrix and then
+// adding it costs two 2 MB passes per time step and nothing else.
+func (c *LSTMCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State) {
+	cc := cache.(lstmCellCache)
+	dh, dcNext := dNext[0], dNext[1]
+
+	do := dh.Hadamard(cc.tanhC)
+	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, dTanh).AddInPlace(dcNext)
+
+	df := dc.Hadamard(cc.cPrev)
+	di := dc.Hadamard(cc.g)
+	dg := dc.Hadamard(cc.i)
+	dcPrev := dc.Hadamard(cc.f)
+
+	dz := core.HStack(
+		df.HadamardApply(cc.f, dSigmoid),
+		di.HadamardApply(cc.i, dSigmoid),
+		do.HadamardApply(cc.o, dSigmoid),
+		dg.HadamardApply(cc.g, dTanh),
+	)
+
+	dx = dz.DotT(c.W)
+	dhPrev := dz.DotT(c.U)
+
+	cc.x.TDotAccInto(dz, acc["W"])
+	cc.hPrev.TDotAccInto(dz, acc["U"])
+	dz.SumRowsInto(acc["b"])
+
+	return dx, State{dhPrev, dcPrev}
+}
+
 func (c *LSTMCell) Params() core.Params {
 	return core.Params{"W": c.W, "U": c.U, "b": c.B}
 }
