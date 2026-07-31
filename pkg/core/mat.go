@@ -2,17 +2,13 @@ package core
 
 import (
 	"fmt"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 const (
 	tileM = 32
 	tileK = 32
-
-	parallelThreshold = 1 << 19
 )
 
 type Mat struct {
@@ -148,38 +144,7 @@ func (mat Mat) Dot(other Mat) Mat {
 }
 
 func dotInto(a, b, result []float32, m, n, p int) {
-	numWorkers := runtime.GOMAXPROCS(0)
-	if numWorkers == 1 || m*n*p <= parallelThreshold {
-		dotTiled(a, b, result, 0, m, n, p, 0, p)
-		return
-	}
-
-	var wg sync.WaitGroup
-	if m >= numWorkers*4 || m >= p {
-
-		chunk := (m + numWorkers - 1) / numWorkers
-		for rs := 0; rs < m; rs += chunk {
-			re := min(rs+chunk, m)
-			wg.Add(1)
-			go func(rs, re int) {
-				defer wg.Done()
-				dotTiled(a, b, result, rs, re, n, p, 0, p)
-			}(rs, re)
-		}
-	} else {
-
-		chunk := (p + numWorkers - 1) / numWorkers
-		chunk = (chunk + 7) / 8 * 8
-		for cs := 0; cs < p; cs += chunk {
-			ce := min(cs+chunk, p)
-			wg.Add(1)
-			go func(cs, ce int) {
-				defer wg.Done()
-				dotTiled(a, b, result, 0, m, n, p, cs, ce)
-			}(cs, ce)
-		}
-	}
-	wg.Wait()
+	dotTiled(a, b, result, 0, m, n, p, 0, p)
 }
 
 func (mat Mat) DotT(other Mat) Mat {
