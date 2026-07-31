@@ -51,15 +51,15 @@ func LoadCSV(path string, labelCol int, hasHeader bool) (Data, error) {
 		xc := 0
 
 		for c, val := range row {
-			fv, err := strconv.ParseFloat(val, 64)
+			fv, err := strconv.ParseFloat(val, 32)
 			if err != nil {
 				return Data{}, err
 			}
 
 			if c == labelCol {
-				y.Set(r, 0, fv)
+				y.Set(r, 0, float32(fv))
 			} else {
-				x.Set(r, xc, fv)
+				x.Set(r, xc, float32(fv))
 				xc++
 			}
 		}
@@ -71,7 +71,7 @@ func LoadCSV(path string, labelCol int, hasHeader bool) (Data, error) {
 	}, nil
 }
 
-func (d Data) Split(trainRatio, devRatio, testRatio float64) (Data, Data, Data) {
+func (d Data) Split(trainRatio, devRatio, testRatio float32) (Data, Data, Data) {
 	total := trainRatio + devRatio + testRatio
 
 	if total <= 0 {
@@ -84,8 +84,8 @@ func (d Data) Split(trainRatio, devRatio, testRatio float64) (Data, Data, Data) 
 
 	n := d.X.Rows
 
-	trainEnd := int(float64(n) * trainRatio)
-	devEnd := trainEnd + int(float64(n)*devRatio)
+	trainEnd := int(float32(n) * trainRatio)
+	devEnd := trainEnd + int(float32(n)*devRatio)
 
 	train := Data{
 		X: d.X.Slice(0, trainEnd),

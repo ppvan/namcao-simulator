@@ -20,10 +20,10 @@ type Sequential interface {
 
 type Prediction struct {
 	Class int
-	Probs []float64
+	Probs []float32
 }
 
 type TrainMetrics struct {
 	Epoch int
-	Loss  float64
+	Loss  float32
 }

@@ -71,8 +71,8 @@ func Decode(ids []int, v *Vocab) string {
 	return string(b)
 }
 
-func SplitData(ids []int, trainRatio float64) (train, val []int) {
-	n := int(float64(len(ids)) * trainRatio)
+func SplitData(ids []int, trainRatio float32) (train, val []int) {
+	n := int(float32(len(ids)) * trainRatio)
 	return ids[:n], ids[n:]
 }
 

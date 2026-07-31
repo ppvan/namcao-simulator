@@ -52,7 +52,7 @@ func main() {
 		log.Fatalf("encode seed: %v", err)
 	}
 
-	for _, temp := range []float64{0.5, 0.8, 1.0} {
+	for _, temp := range []float32{0.5, 0.8, 1.0} {
 		generated := model.Sample(seed, 500, temp, rng)
 		fmt.Printf("\n--- sample (temperature %.1f) ---\n", temp)
 		fmt.Println(data.Decode(append(append([]int{}, seed...), generated...), vocab))

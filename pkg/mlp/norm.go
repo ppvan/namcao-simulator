@@ -1,8 +1,6 @@
 package mlp
 
 import (
-	"math"
-
 	"github.com/ppvan/gpt/pkg/core"
 )
 
@@ -22,7 +20,7 @@ type batchNormCache struct {
 
 func NewBatchNorm(features int) *BatchNorm {
 	return &BatchNorm{
-		gamma: core.NewZeroMat(1, features).Apply(func(float64) float64 {
+		gamma: core.NewZeroMat(1, features).Apply(func(float32) float32 {
 			return 1
 		}),
 		beta: core.NewZeroMat(1, features),
@@ -30,11 +28,11 @@ func NewBatchNorm(features int) *BatchNorm {
 }
 
 func (l *BatchNorm) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
-	one := core.NewZeroMat(x.Rows, 1).Apply(func(float64) float64 { return 1 })
+	one := core.NewZeroMat(x.Rows, 1).Apply(func(float32) float32 { return 1 })
 	oneT := one.Transpose()
 
 	// mean: 1 x d
-	mean := oneT.Dot(x).Scale(1 / float64(x.Rows))
+	mean := oneT.Dot(x).Scale(1 / float32(x.Rows))
 
 	// broadcast mean
 	meanBatch := one.Dot(mean)
@@ -44,12 +42,12 @@ func (l *BatchNorm) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
 
 	// variance: 1 x d
 	variance := oneT.
-		Dot(xCentered.Apply(func(v float64) float64 { return v * v })).
-		Scale(1 / float64(x.Rows))
+		Dot(xCentered.Apply(func(v float32) float32 { return v * v })).
+		Scale(1 / float32(x.Rows))
 
 	// invStd: 1 x d  <-- DO NOT broadcast here
-	invStd := variance.Apply(func(v float64) float64 {
-		return 1.0 / math.Sqrt(v+epsilon)
+	invStd := variance.Apply(func(v float32) float32 {
+		return 1.0 / core.FastSqrt32(v+epsilon)
 	})
 
 	// Broadcast only when needed
@@ -73,14 +71,14 @@ func (l *BatchNorm) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
 
 func (l *BatchNorm) Backward(cache core.Cache, dOut core.Mat) (dIn core.Mat, grads core.Grads) {
 	c := cache.(batchNormCache)
-	one := core.NewZeroMat(dOut.Rows, 1).Apply(func(f float64) float64 { return 1 })
+	one := core.NewZeroMat(dOut.Rows, 1).Apply(func(f float32) float32 { return 1 })
 	oneT := one.Transpose()
 
 	dbeta := oneT.Dot(dOut)
 	dgamma := oneT.Dot(dOut.Hadamard(c.xHat))
 	dXHat := dOut.Hadamard(one.Dot(l.gamma))
 
-	invStd3 := c.invStd.Apply(func(v float64) float64 {
+	invStd3 := c.invStd.Apply(func(v float32) float32 {
 		return v * v * v
 	})
 	dVariance := oneT.
@@ -96,10 +94,10 @@ func (l *BatchNorm) Backward(cache core.Cache, dOut core.Mat) (dIn core.Mat, gra
 		Scale(-1)
 	term2 := c.xCentered.
 		Hadamard(one.Dot(dVariance)).
-		Scale(2.0 / float64(dOut.Rows))
+		Scale(2.0 / float32(dOut.Rows))
 	term3 := one.
 		Dot(dMean).
-		Scale(1.0 / float64(dOut.Rows))
+		Scale(1.0 / float32(dOut.Rows))
 
 	dIn = term1.Add(term2).Add(term3)
 

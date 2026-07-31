@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,7 +16,7 @@ const (
 )
 
 type Mat struct {
-	weights []float64
+	weights []float32
 	Rows    int
 	Columns int
 }
@@ -26,11 +25,11 @@ func (mat Mat) at(r, c int) int {
 	return r*mat.Columns + c
 }
 
-func (mat Mat) Get(r, c int) float64 {
+func (mat Mat) Get(r, c int) float32 {
 	return mat.weights[mat.at(r, c)]
 }
 
-func (mat Mat) Set(r, c int, v float64) {
+func (mat Mat) Set(r, c int, v float32) {
 	mat.weights[mat.at(r, c)] = v
 }
 
@@ -41,9 +40,9 @@ func (mat Mat) assertSameShape(other Mat, op string) {
 	}
 }
 
-func (mat Mat) Combine(other Mat, f func(a, b float64) float64) Mat {
+func (mat Mat) Combine(other Mat, f func(a, b float32) float32) Mat {
 	mat.assertSameShape(other, "combine")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	b := other.weights
 	for i, v := range mat.weights {
 		result[i] = f(v, b[i])
@@ -53,7 +52,7 @@ func (mat Mat) Combine(other Mat, f func(a, b float64) float64) Mat {
 
 func (mat Mat) Add(other Mat) Mat {
 	mat.assertSameShape(other, "add")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	b := other.weights
 	for i, v := range mat.weights {
 		result[i] = v + b[i]
@@ -63,7 +62,7 @@ func (mat Mat) Add(other Mat) Mat {
 
 func (mat Mat) Sub(other Mat) Mat {
 	mat.assertSameShape(other, "sub")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	b := other.weights
 	for i, v := range mat.weights {
 		result[i] = v - b[i]
@@ -73,7 +72,7 @@ func (mat Mat) Sub(other Mat) Mat {
 
 func (mat Mat) Hadamard(other Mat) Mat {
 	mat.assertSameShape(other, "hadamard")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	b := other.weights
 	for i, v := range mat.weights {
 		result[i] = v * b[i]
@@ -108,16 +107,16 @@ func (mat Mat) HadamardInPlace(other Mat) Mat {
 	return mat
 }
 
-func (mat Mat) ApplyInPlace(fn func(float64) float64) Mat {
+func (mat Mat) ApplyInPlace(fn func(float32) float32) Mat {
 	for i, v := range mat.weights {
 		mat.weights[i] = fn(v)
 	}
 	return mat
 }
 
-func (mat Mat) HadamardApply(other Mat, fn func(float64) float64) Mat {
+func (mat Mat) HadamardApply(other Mat, fn func(float32) float32) Mat {
 	mat.assertSameShape(other, "hadamard")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	b := other.weights
 	for i, v := range mat.weights {
 		result[i] = v * fn(b[i])
@@ -129,7 +128,7 @@ func (mat Mat) MulAdd(b, c, d Mat) Mat {
 	mat.assertSameShape(b, "muladd")
 	c.assertSameShape(d, "muladd")
 	mat.assertSameShape(c, "muladd")
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	bw, cw, dw := b.weights, c.weights, d.weights
 	for i, v := range mat.weights {
 		result[i] = v*bw[i] + cw[i]*dw[i]
@@ -143,12 +142,12 @@ func (mat Mat) Dot(other Mat) Mat {
 		panic(msg)
 	}
 	m, n, p := mat.Rows, mat.Columns, other.Columns
-	result := make([]float64, m*p)
+	result := make([]float32, m*p)
 	dotInto(mat.weights, other.weights, result, m, n, p)
 	return Mat{weights: result, Rows: m, Columns: p}
 }
 
-func dotInto(a, b, result []float64, m, n, p int) {
+func dotInto(a, b, result []float32, m, n, p int) {
 	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers == 1 || m*n*p <= parallelThreshold {
 		dotTiled(a, b, result, 0, m, n, p, 0, p)
@@ -183,7 +182,7 @@ func dotInto(a, b, result []float64, m, n, p int) {
 	wg.Wait()
 }
 
-func dotTiled(a, b, result []float64, rowStart, rowEnd, n, p, colStart, colEnd int) {
+func dotTiled(a, b, result []float32, rowStart, rowEnd, n, p, colStart, colEnd int) {
 	for ii := rowStart; ii < rowEnd; ii += tileM {
 		iMax := min(ii+tileM, rowEnd)
 		for kk := 0; kk < n; kk += tileK {
@@ -224,18 +223,18 @@ func (mat Mat) DotT(other Mat) Mat {
 			mat.Rows, mat.Columns, other.Rows, other.Columns))
 	}
 	m, n, q := mat.Rows, mat.Columns, other.Rows
-	result := make([]float64, m*q)
+	result := make([]float32, m*q)
 	dotTInto(mat.weights, other.weights, result, m, n, q)
 	return Mat{weights: result, Rows: m, Columns: q}
 }
 
-func dotTInto(a, b, c []float64, m, n, q int) {
+func dotTInto(a, b, c []float32, m, n, q int) {
 	for i := 0; i < m; i++ {
 		arow := a[i*n : i*n+n]
 		crow := c[i*q : i*q+q]
 		for j := 0; j < q; j++ {
 			brow := b[j*n : j*n+n]
-			var s0, s1, s2, s3 float64
+			var s0, s1, s2, s3 float32
 			k := 0
 			for ; k+3 < n; k += 4 {
 				s0 += arow[k] * brow[k]
@@ -279,7 +278,7 @@ func (mat Mat) SumRowsInto(dst Mat) Mat {
 	return dst
 }
 
-func tDotAccInto(a, b, c []float64, m, n, p int) {
+func tDotAccInto(a, b, c []float32, m, n, p int) {
 	for k := 0; k < m; k++ {
 		arow := a[k*n : k*n+n]
 		brow := b[k*p : k*p+p]
@@ -297,7 +296,7 @@ func tDotAccInto(a, b, c []float64, m, n, p int) {
 }
 
 func (mat Mat) Transpose() Mat {
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	rows, cols := mat.Rows, mat.Columns
 	src := mat.weights
 
@@ -318,16 +317,16 @@ func (mat Mat) Transpose() Mat {
 	return Mat{weights: result, Rows: mat.Columns, Columns: mat.Rows}
 }
 
-func (mat Mat) Apply(fn func(float64) float64) Mat {
-	result := make([]float64, len(mat.weights))
+func (mat Mat) Apply(fn func(float32) float32) Mat {
+	result := make([]float32, len(mat.weights))
 	for i, v := range mat.weights {
 		result[i] = fn(v)
 	}
 	return Mat{weights: result, Rows: mat.Rows, Columns: mat.Columns}
 }
 
-func (mat Mat) Scale(s float64) Mat {
-	result := make([]float64, len(mat.weights))
+func (mat Mat) Scale(s float32) Mat {
+	result := make([]float32, len(mat.weights))
 	for i, v := range mat.weights {
 		result[i] = v * s
 	}
@@ -336,7 +335,7 @@ func (mat Mat) Scale(s float64) Mat {
 
 func (mat Mat) SumRows() Mat {
 	cols := mat.Columns
-	result := make([]float64, cols)
+	result := make([]float32, cols)
 	for i := 0; i < mat.Rows; i++ {
 		row := mat.weights[i*cols : (i+1)*cols]
 		for j, v := range row {
@@ -346,27 +345,27 @@ func (mat Mat) SumRows() Mat {
 	return Mat{weights: result, Rows: 1, Columns: cols}
 }
 
-func (mat Mat) Sum() float64 {
-	var total float64
+func (mat Mat) Sum() float32 {
+	var total float32
 	for _, v := range mat.weights {
 		total += v
 	}
 	return total
 }
 
-func (mat Mat) Mean() float64 {
-	return mat.Sum() / float64(len(mat.weights))
+func (mat Mat) Mean() float32 {
+	return mat.Sum() / float32(len(mat.weights))
 }
 
 func NewZeroMat(row, column int) Mat {
 	return Mat{
-		weights: make([]float64, row*column),
+		weights: make([]float32, row*column),
 		Rows:    row,
 		Columns: column,
 	}
 }
 
-func NewMat(row, column int, data []float64) Mat {
+func NewMat(row, column int, data []float32) Mat {
 	return Mat{
 		weights: data,
 		Rows:    row,
@@ -395,7 +394,7 @@ func (mat Mat) SliceCols(start, end int) Mat {
 		panic("invalid column slice range")
 	}
 	cols := end - start
-	result := make([]float64, mat.Rows*cols)
+	result := make([]float32, mat.Rows*cols)
 	for i := 0; i < mat.Rows; i++ {
 		copy(result[i*cols:(i+1)*cols], mat.weights[i*mat.Columns+start:i*mat.Columns+end])
 	}
@@ -414,7 +413,7 @@ func HStack(ms ...Mat) Mat {
 		}
 		total += m.Columns
 	}
-	result := make([]float64, rows*total)
+	result := make([]float32, rows*total)
 	off := 0
 	for _, m := range ms {
 		for i := 0; i < rows; i++ {
@@ -425,7 +424,7 @@ func HStack(ms ...Mat) Mat {
 	return Mat{weights: result, Rows: rows, Columns: total}
 }
 
-func (mat Mat) ApplyColsInPlace(start, end int, fn func(float64) float64) Mat {
+func (mat Mat) ApplyColsInPlace(start, end int, fn func(float32) float32) Mat {
 	if start < 0 || end > mat.Columns || start > end {
 		panic("invalid column range")
 	}
@@ -446,7 +445,7 @@ func (mat Mat) String() string {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(strconv.FormatFloat(mat.Get(i, j), 'f', 2, 64))
+			sb.WriteString(strconv.FormatFloat(float64(mat.Get(i, j)), 'f', 2, 32))
 		}
 		sb.WriteString("]")
 		if i < mat.Rows-1 {
@@ -464,7 +463,7 @@ func (mat Mat) Broadcast(rows int) Mat {
 		return mat
 	}
 	cols := mat.Columns
-	result := make([]float64, rows*cols)
+	result := make([]float32, rows*cols)
 	for i := 0; i < rows; i++ {
 		copy(result[i*cols:(i+1)*cols], mat.weights)
 	}
@@ -478,7 +477,7 @@ func (mat Mat) AddBias(bias Mat) Mat {
 		}
 		panic(fmt.Sprintf("AddBias requires a (1, %v) bias, got (%v x %v)", mat.Columns, bias.Rows, bias.Columns))
 	}
-	result := make([]float64, len(mat.weights))
+	result := make([]float32, len(mat.weights))
 	cols := mat.Columns
 	bw := bias.weights
 	for i := 0; i < mat.Rows; i++ {
@@ -506,7 +505,7 @@ func (mat Mat) AddBiasInPlace(bias Mat) Mat {
 	return mat
 }
 
-func (mat Mat) ScaleInPlace(s float64) Mat {
+func (mat Mat) ScaleInPlace(s float32) Mat {
 	for i := range mat.weights {
 		mat.weights[i] *= s
 	}
@@ -514,8 +513,8 @@ func (mat Mat) ScaleInPlace(s float64) Mat {
 }
 
 // SumSquares returns the sum of squared elements [performance]
-func (mat Mat) SumSquares() float64 {
-	var s0, s1 float64
+func (mat Mat) SumSquares() float32 {
+	var s0, s1 float32
 	w := mat.weights
 	i := 0
 	for ; i+1 < len(w); i += 2 {
@@ -529,7 +528,7 @@ func (mat Mat) SumSquares() float64 {
 }
 
 // AdamStep applies one fused Adam update to param in place[performance].
-func AdamStep(param, grad, m, v Mat, rate, b1, b2, eps, corr1, corr2 float64) {
+func AdamStep(param, grad, m, v Mat, rate, b1, b2, eps, corr1, corr2 float32) {
 	p, g, mw, vw := param.weights, grad.weights, m.weights, v.weights
 	ob1, ob2 := 1-b1, 1-b2
 	for i := range p {
@@ -537,6 +536,6 @@ func AdamStep(param, grad, m, v Mat, rate, b1, b2, eps, corr1, corr2 float64) {
 		mi := b1*mw[i] + ob1*gi
 		vi := b2*vw[i] + ob2*gi*gi
 		mw[i], vw[i] = mi, vi
-		p[i] -= rate * (mi / corr1) / (math.Sqrt(vi/corr2) + eps)
+		p[i] -= rate * (mi / corr1) / (FastSqrt32(vi/corr2) + eps)
 	}
 }

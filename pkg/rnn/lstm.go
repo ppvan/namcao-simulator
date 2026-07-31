@@ -1,20 +1,14 @@
 package rnn
 
 import (
-	"math"
-
 	"github.com/ppvan/gpt/pkg/core"
 )
 
-func sigmoid(v float64) float64 {
-	return 1.0 / (1.0 + math.Exp(-v))
-}
-
-func dSigmoid(y float64) float64 {
+func dSigmoid(y float32) float32 {
 	return y * (1 - y)
 }
 
-func dTanh(y float64) float64 {
+func dTanh(y float32) float32 {
 	return 1 - y*y
 }
 
@@ -55,7 +49,7 @@ func NewLSTMCell(inputSize, hiddenSize int) *LSTMCell {
 	// initialize each gate block independently so the per-gate Xavier
 	// scale matches the previous separate-matrix layout; forget-gate
 	// bias starts at 1 as before
-	ones := core.NewZeroMat(1, hiddenSize).Apply(func(float64) float64 { return 1 })
+	ones := core.NewZeroMat(1, hiddenSize).Apply(func(float32) float32 { return 1 })
 	zeros := core.NewZeroMat(1, hiddenSize)
 	return &LSTMCell{
 		W: core.HStack(
@@ -91,8 +85,8 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	z := x.Dot(c.W).AddInPlace(hPrev.Dot(c.U)).AddBiasInPlace(c.B)
 
 	// sigmoid on the f|i|o blocks, tanh on the g block, in place
-	z.ApplyColsInPlace(0, 3*h, sigmoid)
-	z.ApplyColsInPlace(3*h, 4*h, math.Tanh)
+	z.ApplyColsInPlace(0, 3*h, core.FastSigmoid32)
+	z.ApplyColsInPlace(3*h, 4*h, core.FastTanh32)
 
 	f := z.SliceCols(0, h)
 	i := z.SliceCols(h, 2*h)
@@ -100,7 +94,7 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	g := z.SliceCols(3*h, 4*h)
 
 	cNext := f.MulAdd(cPrev, i, g) // f⊙cPrev + i⊙g in one pass
-	tanhC := cNext.Apply(math.Tanh)
+	tanhC := cNext.Apply(core.FastTanh32)
 	hNext := o.Hadamard(tanhC)
 
 	cache = lstmCellCache{

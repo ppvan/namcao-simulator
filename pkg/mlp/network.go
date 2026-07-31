@@ -24,10 +24,10 @@ func NewNetwork(model Sequential, loss core.LossFunction, optimizer core.Optimiz
 }
 
 type EvalMetrics struct {
-	Accuracy  float64
-	Precision float64
-	Recall    float64
-	F1        float64
+	Accuracy  float32
+	Precision float32
+	Recall    float32
+	F1        float32
 }
 
 type NetworkOption func(*Network)
@@ -47,7 +47,7 @@ func (n *Network) Predict(x core.Mat) (Prediction, error) {
 	for i := 0; i < logits.Rows; i++ {
 		maxIdx := 0
 		maxVal := logits.Get(i, 0)
-		probs := make([]float64, logits.Columns)
+		probs := make([]float32, logits.Columns)
 		probs[0] = maxVal
 		for j := 1; j < logits.Columns; j++ {
 			v := logits.Get(i, j)
@@ -76,7 +76,7 @@ func (n *Network) PredictBatch(x core.Mat) ([]Prediction, error) {
 	for i := 0; i < logits.Rows; i++ {
 		maxIdx := 0
 		maxVal := logits.Get(i, 0)
-		probs := make([]float64, logits.Columns)
+		probs := make([]float32, logits.Columns)
 		probs[0] = maxVal
 		for j := 1; j < logits.Columns; j++ {
 			v := logits.Get(i, j)
@@ -102,8 +102,8 @@ func (n *Network) Fit(ctx context.Context, data data.Data, epochs int, batchSize
 			default:
 			}
 
-			epochLoss := 0.0
-			batchCount := 0
+			var epochLoss float32
+			var batchCount float32
 			for _, batch := range data.Batches(batchSize) {
 				x := batch.X
 				y := batch.Y
@@ -132,7 +132,7 @@ func (n *Network) Fit(ctx context.Context, data data.Data, epochs int, batchSize
 			}
 
 			select {
-			case out <- TrainMetrics{Epoch: epoch + 1, Loss: epochLoss / float64(batchCount)}:
+			case out <- TrainMetrics{Epoch: epoch + 1, Loss: epochLoss / float32(batchCount)}:
 			case <-ctx.Done():
 				return
 			}
@@ -156,19 +156,19 @@ func (n *Network) Evaluate(dev data.Data) (EvalMetrics, error) {
 		F1:        f1(p, r),
 	}, nil
 }
-func accuracy(preds []Prediction, y core.Mat) float64 {
+func accuracy(preds []Prediction, y core.Mat) float32 {
 	correct := 0
 	for i, p := range preds {
 		if p.Class == int(y.Get(i, 0)) {
 			correct++
 		}
 	}
-	return float64(correct) / float64(len(preds))
+	return float32(correct) / float32(len(preds))
 }
 
-func precision(preds []Prediction, y core.Mat) float64 {
+func precision(preds []Prediction, y core.Mat) float32 {
 	n := len(preds)
-	classes := map[int]float64{}
+	classes := map[int]float32{}
 	for i := range y.Rows {
 		classes[int(y.Get(i, 0))] = 0
 	}
@@ -189,18 +189,19 @@ func precision(preds []Prediction, y core.Mat) float64 {
 			classes[class] = 0
 			continue
 		}
-		classes[class] = float64(truePositives) / float64(positives)
+		classes[class] = float32(truePositives) / float32(positives)
 	}
-	avg := 0.0
+
+	var avg float32
 	for _, v := range classes {
 		avg += v
 	}
-	return avg / float64(len(classes))
+	return avg / float32(len(classes))
 }
 
-func recall(preds []Prediction, y core.Mat) float64 {
+func recall(preds []Prediction, y core.Mat) float32 {
 	n := len(preds)
-	classes := map[int]float64{}
+	classes := map[int]float32{}
 	for i := range y.Rows {
 		classes[int(y.Get(i, 0))] = 0
 	}
@@ -221,16 +222,17 @@ func recall(preds []Prediction, y core.Mat) float64 {
 			classes[class] = 0
 			continue
 		}
-		classes[class] = float64(truePositives) / float64(actuals)
+		classes[class] = float32(truePositives) / float32(actuals)
 	}
-	avg := 0.0
+
+	var avg float32
 	for _, v := range classes {
 		avg += v
 	}
-	return avg / float64(len(classes))
+	return avg / float32(len(classes))
 }
 
-func f1(precision, recall float64) float64 {
+func f1(precision, recall float32) float32 {
 	if precision+recall == 0 {
 		return 0
 	}

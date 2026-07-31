@@ -1,7 +1,5 @@
 package core
 
-import "math"
-
 type ReLU struct{}
 type reluCache struct {
 	x Mat
@@ -12,7 +10,7 @@ func NewReLU() *ReLU {
 }
 
 func (r *ReLU) Forward(x Mat) (out Mat, cache Cache) {
-	out = x.Apply(func(v float64) float64 {
+	out = x.Apply(func(v float32) float32 {
 		if v > 0 {
 			return v
 		}
@@ -24,7 +22,7 @@ func (r *ReLU) Forward(x Mat) (out Mat, cache Cache) {
 func (r *ReLU) Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads) {
 	c := cache.(reluCache)
 	dIn = dOut.Hadamard(
-		c.x.Apply(func(v float64) float64 {
+		c.x.Apply(func(v float32) float32 {
 			if v > 0 {
 				return 1
 			}
@@ -35,19 +33,19 @@ func (r *ReLU) Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads) {
 }
 
 type LeakyReLU struct {
-	Alpha float64
+	Alpha float32
 }
 type leakyReluCache struct {
 	x     Mat
-	alpha float64
+	alpha float32
 }
 
-func NewLeakyReLU(alpha float64) *LeakyReLU {
+func NewLeakyReLU(alpha float32) *LeakyReLU {
 	return &LeakyReLU{Alpha: alpha}
 }
 
 func (l *LeakyReLU) Forward(x Mat) (out Mat, cache Cache) {
-	out = x.Apply(func(v float64) float64 {
+	out = x.Apply(func(v float32) float32 {
 		if v > 0 {
 			return v
 		}
@@ -59,7 +57,7 @@ func (l *LeakyReLU) Forward(x Mat) (out Mat, cache Cache) {
 func (l *LeakyReLU) Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads) {
 	c := cache.(leakyReluCache)
 	dIn = dOut.Hadamard(
-		c.x.Apply(func(v float64) float64 {
+		c.x.Apply(func(v float32) float32 {
 			if v > 0 {
 				return 1
 			}
@@ -80,8 +78,8 @@ func NewSigmoid() *Sigmoid {
 }
 
 func (s *Sigmoid) Forward(x Mat) (out Mat, cache Cache) {
-	out = x.Apply(func(v float64) float64 {
-		return 1.0 / (1.0 + math.Exp(-v))
+	out = x.Apply(func(v float32) float32 {
+		return 1.0 / (1.0 + FastExp32(-v))
 	})
 	return out, sigmoidCache{out: out}
 }
@@ -90,7 +88,7 @@ func (s *Sigmoid) Backward(cache Cache, dOut Mat) (dIn Mat, grads Grads) {
 	c := cache.(sigmoidCache)
 
 	dIn = dOut.Hadamard(
-		c.out.Apply(func(y float64) float64 {
+		c.out.Apply(func(y float32) float32 {
 			return y * (1 - y)
 		}),
 	)

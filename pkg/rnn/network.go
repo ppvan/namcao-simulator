@@ -3,7 +3,6 @@ package rnn
 import (
 	"errors"
 	"fmt"
-	"math"
 	"math/rand"
 
 	"github.com/ppvan/gpt/pkg/core"
@@ -20,11 +19,11 @@ func toTimeMajor(ids []int) [][]int {
 
 func targetMat(id int) core.Mat {
 	m := core.NewZeroMat(1, 1)
-	m.Set(0, 0, float64(id))
+	m.Set(0, 0, float32(id))
 	return m
 }
 
-func LossAndGrad(logits []core.Mat, ys []int) (loss float64, dLogits []core.Mat, err error) {
+func LossAndGrad(logits []core.Mat, ys []int) (loss float32, dLogits []core.Mat, err error) {
 	T := len(logits)
 	if T == 0 {
 		return 0, nil, errors.New("rnn: empty sequence")
@@ -35,9 +34,9 @@ func LossAndGrad(logits []core.Mat, ys []int) (loss float64, dLogits []core.Mat,
 
 	ce := core.CrossEntropy()
 	dLogits = make([]core.Mat, T)
-	scale := 1.0 / float64(T)
+	scale := 1.0 / float32(T)
 
-	var total float64
+	var total float32
 	for t, y := range logits {
 		target := targetMat(ys[t])
 
@@ -57,18 +56,18 @@ func LossAndGrad(logits []core.Mat, ys []int) (loss float64, dLogits []core.Mat,
 	return total * scale, dLogits, nil
 }
 
-func ClipGrads(grads core.Grads, maxNorm float64) core.Grads {
+func ClipGrads(grads core.Grads, maxNorm float32) core.Grads {
 	if maxNorm <= 0 {
 		return grads
 	}
 
-	var sumSq float64
+	var sumSq float32
 	for _, g := range grads {
 		sumSq += g.SumSquares()
 	}
-	norm := math.Sqrt(sumSq)
+	norm := core.FastSqrt32(sumSq)
 
-	if norm <= maxNorm || norm == 0 || math.IsNaN(norm) {
+	if norm <= maxNorm || norm == 0 || core.IsNaN32(norm) {
 		return grads
 	}
 
@@ -79,7 +78,7 @@ func ClipGrads(grads core.Grads, maxNorm float64) core.Grads {
 	return grads
 }
 
-func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm float64) (loss float64, sFinal State, err error) {
+func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm float32) (loss float32, sFinal State, err error) {
 	logits, s, cache := m.ForwardSeq(toTimeMajor(xs), s0)
 
 	loss, dLogits, err := LossAndGrad(logits, ys)
@@ -99,14 +98,14 @@ func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm f
 	return loss, s, nil
 }
 
-func (m *CharRNN) EvalLoss(ids []int, seqLen, maxWindows int) (float64, error) {
+func (m *CharRNN) EvalLoss(ids []int, seqLen, maxWindows int) (float32, error) {
 	if len(ids) < seqLen+1 {
 		return 0, errors.New("rnn: not enough data to evaluate")
 	}
 
 	s := m.InitState(1)
 	pos := 0
-	var total float64
+	var total float32
 	windows := 0
 
 	for windows < maxWindows {
@@ -130,13 +129,13 @@ func (m *CharRNN) EvalLoss(ids []int, seqLen, maxWindows int) (float64, error) {
 	if windows == 0 {
 		return 0, errors.New("rnn: no evaluation windows")
 	}
-	return total / float64(windows), nil
+	return total / float32(windows), nil
 }
 
 type TrainConfig struct {
 	SeqLen      int
 	Steps       int
-	ClipNorm    float64
+	ClipNorm    float32
 	LogEvery    int
 	EvalEvery   int
 	EvalWindows int
@@ -163,7 +162,7 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 
 	s := m.InitState(1)
 	pos := 0
-	running := 0.0
+	var running float32 = 0.0
 	seen := 0
 
 	for step := 1; step <= cfg.Steps; step++ {
@@ -183,7 +182,7 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 		seen++
 
 		if cfg.LogEvery > 0 && step%cfg.LogEvery == 0 {
-			fmt.Printf("step %d: train loss %.4f\n", step, running/float64(seen))
+			fmt.Printf("step %d: train loss %.4f\n", step, running/float32(seen))
 			running, seen = 0, 0
 		}
 
@@ -203,11 +202,11 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 	return nil
 }
 
-func sampleFromLogits(logits core.Mat, temperature float64, rng *rand.Rand) int {
+func sampleFromLogits(logits core.Mat, temperature float32, rng *rand.Rand) int {
 	cols := logits.Columns
 
 	if temperature <= 0 {
-		best, bestVal := 0, math.Inf(-1)
+		best, bestVal := 0, core.NegInf32()
 		for j := 0; j < cols; j++ {
 			if v := logits.Get(0, j); v > bestVal {
 				best, bestVal = j, v
@@ -216,23 +215,23 @@ func sampleFromLogits(logits core.Mat, temperature float64, rng *rand.Rand) int 
 		return best
 	}
 
-	max := math.Inf(-1)
+	max := core.NegInf32()
 	for j := 0; j < cols; j++ {
 		if v := logits.Get(0, j) / temperature; v > max {
 			max = v
 		}
 	}
 
-	probs := make([]float64, cols)
-	sum := 0.0
+	probs := make([]float32, cols)
+	var sum float32
 	for j := 0; j < cols; j++ {
-		p := math.Exp(logits.Get(0, j)/temperature - max)
+		p := core.FastExp32(logits.Get(0, j)/temperature - max)
 		probs[j] = p
 		sum += p
 	}
 
-	r := rng.Float64() * sum
-	acc := 0.0
+	r := rng.Float32() * sum
+	var acc float32
 	for j, p := range probs {
 		acc += p
 		if r <= acc {
@@ -242,7 +241,7 @@ func sampleFromLogits(logits core.Mat, temperature float64, rng *rand.Rand) int 
 	return cols - 1
 }
 
-func (m *CharRNN) Sample(seed []int, n int, temperature float64, rng *rand.Rand) []int {
+func (m *CharRNN) Sample(seed []int, n int, temperature float32, rng *rand.Rand) []int {
 	if n <= 0 {
 		return nil
 	}

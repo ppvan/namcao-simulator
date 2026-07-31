@@ -1,25 +1,8 @@
 package rnn
 
 import (
-	"math"
-
 	"github.com/ppvan/gpt/pkg/core"
 )
-
-// sumRows now delegates to core.SumRows: a single column-sum pass with
-// one allocation, instead of building a ones(1, R) matrix and running a
-// matmul. It also always returns a fresh matrix, so a batch-1 bias
-// gradient no longer aliases dz.
-func sumRows(m core.Mat) core.Mat {
-	return m.SumRows()
-}
-
-// addInto accumulates src into dst. The previous Get/Set version paid
-// index arithmetic and bounds checks per element; AddInPlace runs a
-// flat vectorizable loop over the backing arrays (~7x faster).
-func addInto(dst, src core.Mat) {
-	dst.AddInPlace(src)
-}
 
 type State []core.Mat
 
@@ -61,7 +44,7 @@ func (c *RecurentCell) Step(x core.Mat, prev State) (next State, cache core.Cach
 	// x.Dot(Wx) is a fresh buffer, so accumulate and activate in place:
 	// 4 allocations per step become 2.
 	z := x.Dot(c.Wx).AddInPlace(hPrev.Dot(c.Wh)).AddBiasInPlace(c.Bh)
-	hNext := z.ApplyInPlace(math.Tanh)
+	hNext := z.ApplyInPlace(core.FastTanh32)
 	return State{hNext}, rnnCellCache{x: x, hPrev: hPrev, hNext: hNext}
 }
 
@@ -75,7 +58,7 @@ func (c *RecurentCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat,
 	// TDot / DotT avoid materializing the transposed operands
 	dWx := cc.x.TDot(dz)
 	dWh := cc.hPrev.TDot(dz)
-	dBh := sumRows(dz)
+	dBh := dz.SumRows()
 
 	dx = dz.DotT(c.Wx)
 	dhPrev := dz.DotT(c.Wh)
@@ -121,7 +104,7 @@ func (l *rnnLinear) Backward(cache core.Cache, dOut core.Mat) (dIn core.Mat, gra
 	c := cache.(rnnLinearCache)
 
 	dW := c.input.TDot(dOut)
-	dB := sumRows(dOut)
+	dB := dOut.SumRows()
 	dIn = dOut.DotT(l.weights)
 
 	return dIn, core.Grads{"W": dW, "b": dB}
@@ -141,7 +124,7 @@ func (c *RecurentCell) BackwardStepInto(cache core.Cache, dNext State, acc core.
 	dz := dNext[0].HadamardApply(cc.hNext, dTanh)
 	cc.x.TDotAccInto(dz, acc["Wx"])
 	cc.hPrev.TDotAccInto(dz, acc["Wh"])
-	dz.SumRowsInto(acc["Bh"])
+	dz.SumRowsInto(acc["bh"])
 	dx = dz.DotT(c.Wx)
 	return dx, State{dz.DotT(c.Wh)}
 }

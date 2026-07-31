@@ -16,9 +16,9 @@ func main() {
 
 func xor() {
 	x := core.NewMat(
-		4, 2, []float64{0, 0, 0, 1, 1, 0, 1, 1},
+		4, 2, []float32{0, 0, 0, 1, 1, 0, 1, 1},
 	)
-	labels := core.NewMat(4, 1, []float64{0, 1, 1, 0})
+	labels := core.NewMat(4, 1, []float32{0, 1, 1, 0})
 	data := data.Data{
 		X: x, Y: labels,
 	}

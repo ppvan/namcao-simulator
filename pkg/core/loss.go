@@ -3,7 +3,6 @@ package core
 import (
 	"errors"
 	"fmt"
-	"math"
 )
 
 type LossFunction interface {
@@ -25,12 +24,12 @@ func (m meanSquareError) Forward(pred, target Mat) (Mat, error) {
 
 	out := NewZeroMat(pred.Rows, 1)
 	for i := 0; i < pred.Rows; i++ {
-		sum := 0.0
+		var sum float32
 		for j := 0; j < pred.Columns; j++ {
 			d := pred.Get(i, j) - target.Get(i, j)
 			sum += d * d
 		}
-		out.Set(i, 0, sum/float64(pred.Columns))
+		out.Set(i, 0, sum/float32(pred.Columns))
 	}
 	return out, nil
 }
@@ -41,7 +40,7 @@ func (m meanSquareError) Backward(pred, target Mat) (Mat, error) {
 			pred.Rows, pred.Columns, target.Rows, target.Columns)
 	}
 
-	scale := 2.0 / float64(pred.Columns)
+	scale := 2.0 / float32(pred.Columns)
 	out := NewZeroMat(pred.Rows, pred.Columns)
 	for i := 0; i < pred.Rows; i++ {
 		for j := 0; j < pred.Columns; j++ {
@@ -78,13 +77,13 @@ func (c *crossEntropyLoss) Forward(logits, target Mat) (Mat, error) {
 				max = v
 			}
 		}
-		sumExp := 0.0
+		sumExp := float32(0.0)
 		for j := 0; j < logits.Columns; j++ {
-			v := math.Exp(logits.Get(i, j) - max)
+			v := FastExp32(logits.Get(i, j) - max)
 			probs.Set(i, j, v)
 			sumExp += v
 		}
-		logSumExp := max + math.Log(sumExp)
+		logSumExp := max + FastLog32(sumExp)
 		for j := 0; j < logits.Columns; j++ {
 			probs.Set(i, j, probs.Get(i, j)/sumExp)
 		}
@@ -111,7 +110,7 @@ func (c *crossEntropyLoss) Backward(logits, target Mat) (Mat, error) {
 	}
 
 	out := NewZeroMat(logits.Rows, logits.Columns)
-	scale := 1.0 / float64(logits.Rows)
+	scale := 1.0 / float32(logits.Rows)
 	for i := 0; i < logits.Rows; i++ {
 		t := int(target.Get(i, 0))
 		for j := 0; j < logits.Columns; j++ {
@@ -140,9 +139,9 @@ func (b binaryCrossEntropyLoss) Forward(pred, target Mat) (Mat, error) {
 	out := NewZeroMat(pred.Rows, 1)
 	for i := 0; i < pred.Rows; i++ {
 		p := pred.Get(i, 0)
-		p = math.Max(1e-15, math.Min(1-1e-15, p))
+		p = Max32(1e-15, Min32(1-1e-15, p))
 		y := target.Get(i, 0)
-		loss := -y*math.Log(p) - (1-y)*math.Log(1-p)
+		loss := -y*FastLog32(p) - (1-y)*FastLog32(1-p)
 		out.Set(i, 0, loss)
 	}
 	return out, nil
@@ -155,7 +154,7 @@ func (b binaryCrossEntropyLoss) Backward(pred, target Mat) (Mat, error) {
 	}
 
 	out := NewZeroMat(pred.Rows, 1)
-	scale := 1.0 / float64(pred.Rows)
+	scale := 1.0 / float32(pred.Rows)
 	for i := 0; i < pred.Rows; i++ {
 		p := pred.Get(i, 0)
 		y := target.Get(i, 0)

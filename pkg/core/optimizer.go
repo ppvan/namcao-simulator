@@ -1,7 +1,5 @@
 package core
 
-import "math"
-
 // A opaque type saved in forward and useful for backward pass. Extact type depend on the operation
 type Cache any
 
@@ -22,10 +20,10 @@ type Optimizer interface {
 }
 
 type Gradient struct {
-	Rate float64
+	Rate float32
 }
 
-func NewGradient(rate float64) *Gradient {
+func NewGradient(rate float32) *Gradient {
 	return &Gradient{Rate: rate}
 }
 
@@ -36,11 +34,11 @@ func (g *Gradient) Update(name string, param Mat, grad Mat) Mat {
 type Momentum struct {
 	gradAvg map[string]Mat
 
-	Rate float64
-	Beta float64
+	Rate float32
+	Beta float32
 }
 
-func NewMomentum(rate float64, beta float64) *Momentum {
+func NewMomentum(rate float32, beta float32) *Momentum {
 	return &Momentum{Rate: rate, Beta: beta, gradAvg: make(map[string]Mat)}
 }
 
@@ -61,12 +59,12 @@ func (g *Momentum) Update(name string, param Mat, grad Mat) Mat {
 type RMSProp struct {
 	avgSq map[string]Mat
 
-	Rate    float64
-	Beta    float64
-	Epsilon float64
+	Rate    float32
+	Beta    float32
+	Epsilon float32
 }
 
-func NewRMSProp(rate, beta, eps float64) *RMSProp {
+func NewRMSProp(rate, beta, eps float32) *RMSProp {
 	return &RMSProp{
 		avgSq:   make(map[string]Mat),
 		Rate:    rate,
@@ -92,8 +90,8 @@ func (r *RMSProp) Update(name string, param, grad Mat) Mat {
 
 	// sqrt(s) + eps
 	term := s.
-		Apply(math.Sqrt).
-		Apply(func(v float64) float64 {
+		Apply(FastSqrt32).
+		Apply(func(v float32) float32 {
 			return 1 / (v + r.Epsilon)
 		})
 
@@ -106,13 +104,13 @@ type Adam struct {
 	m       map[string]Mat
 	v       map[string]Mat
 	t       map[string]int
-	Rate    float64
-	Beta1   float64
-	Beta2   float64
-	Epsilon float64
+	Rate    float32
+	Beta1   float32
+	Beta2   float32
+	Epsilon float32
 }
 
-func NewAdam(rate, beta1, beta2, eps float64) *Adam {
+func NewAdam(rate, beta1, beta2, eps float32) *Adam {
 	return &Adam{
 		m:       make(map[string]Mat),
 		v:       make(map[string]Mat),
@@ -139,8 +137,8 @@ func (a *Adam) Update(name string, param, grad Mat) Mat {
 	a.t[name]++
 	t := a.t[name]
 
-	corr1 := 1 - math.Pow(a.Beta1, float64(t))
-	corr2 := 1 - math.Pow(a.Beta2, float64(t))
+	corr1 := 1 - FastPow32(a.Beta1, float32(t))
+	corr2 := 1 - FastPow32(a.Beta2, float32(t))
 
 	// One fused pass over the parameter instead of twelve allocating ones.
 	// m and v are updated in place and kept across steps.
