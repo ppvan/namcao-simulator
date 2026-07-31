@@ -122,6 +122,29 @@ func NewAdam(rate, beta1, beta2, eps float32) *Adam {
 	}
 }
 
+// ── checkpoint helpers ────────────────────────────────────────────────────────
+
+// M returns the first-moment (mean) buffers keyed by parameter name.
+// The returned map is the live internal map; do not mutate it.
+func (a *Adam) M() map[string]Mat { return a.m }
+
+// V returns the second-moment (variance) buffers keyed by parameter name.
+// The returned map is the live internal map; do not mutate it.
+func (a *Adam) V() map[string]Mat { return a.v }
+
+// Steps returns the per-parameter step counters.
+func (a *Adam) Steps() map[string]int { return a.t }
+
+// SetState restores moment buffers and step counters from a checkpoint.
+// Hyperparameters (Rate, Beta1, Beta2, Epsilon) must be set separately.
+func (a *Adam) SetState(m map[string]Mat, v map[string]Mat, t map[string]int) {
+	a.m = m
+	a.v = v
+	a.t = t
+}
+
+// ── parameter update ──────────────────────────────────────────────────────────
+
 func (a *Adam) Update(name string, param, grad Mat) Mat {
 	m, ok := a.m[name]
 	if !ok {

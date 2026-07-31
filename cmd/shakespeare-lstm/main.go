@@ -1,9 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 
 	"github.com/ppvan/gpt/pkg/core"
 	"github.com/ppvan/gpt/pkg/data"
@@ -11,6 +13,13 @@ import (
 )
 
 func main() {
+	// ── flags ────────────────────────────────────────────────────────────
+	loadPath := flag.String("load", "", "resume training from this checkpoint file")
+	savePath := flag.String("save", "shakespeare-lstm.ckpt", "write checkpoint to this file after training")
+	noSaveOpt := flag.Bool("no-save-optimizer", false, "omit Adam state from checkpoint (smaller file, can't resume exactly)")
+	flag.Parse()
+
+	// ── data ─────────────────────────────────────────────────────────────
 	text, err := data.LoadText("dataset/tinyshakespeare/shakespeare.txt")
 	if err != nil {
 		log.Fatalf("load text: %v", err)
@@ -23,9 +32,33 @@ func main() {
 	fmt.Printf("corpus %d chars, vocab %d, train %d, val %d\n",
 		len(text), vocab.VocabSize(), len(train), len(val))
 
-	model := rnn.NewCharLSTM(vocab.VocabSize(), 32, 256)
+	// ── model + optimizer ────────────────────────────────────────────────
+	var model *rnn.CharRNN
 	opt := core.NewAdam(0.002, 0.9, 0.999, 1e-8)
 
+	if *loadPath != "" {
+		fmt.Printf("loading checkpoint from %q …\n", *loadPath)
+		res, lerr := rnn.Load(*loadPath)
+		if lerr != nil {
+			log.Fatalf("load checkpoint: %v", lerr)
+		}
+		model = res.Model
+		if res.Adam != nil {
+			// restore moment buffers; set the same hyperparams the run started with
+			res.Adam.Rate = opt.Rate
+			res.Adam.Beta1 = opt.Beta1
+			res.Adam.Beta2 = opt.Beta2
+			res.Adam.Epsilon = opt.Epsilon
+			opt = res.Adam
+			fmt.Println("Adam optimizer state restored from checkpoint")
+		}
+		fmt.Printf("loaded model: vocab %d, embed %d, hidden %d\n",
+			model.VocabSize(), model.Embed.Weights.Columns, model.HiddenSize())
+	} else {
+		model = rnn.NewCharLSTM(vocab.VocabSize(), 32, 256)
+	}
+
+	// ── training config ───────────────────────────────────────────────────
 	cfg := rnn.TrainConfig{
 		SeqLen:      100,
 		Steps:       20000,
@@ -39,13 +72,29 @@ func main() {
 	for _, p := range model.Params() {
 		params += p.Rows * p.Columns
 	}
-	fmt.Printf("lstm: embed 32, hidden 256, %d params, %d chars seen over %d steps\n",
+	fmt.Printf("lstm: embed %d, hidden %d, %d params, %d chars seen over %d steps\n",
+		model.Embed.Weights.Columns, model.HiddenSize(),
 		params, cfg.SeqLen*cfg.Steps, cfg.Steps)
 
 	if err := model.Train(train, val, opt, cfg); err != nil {
 		log.Fatalf("train: %v", err)
 	}
 
+	// ── save checkpoint ───────────────────────────────────────────────────
+	if *savePath != "" {
+		saveOpts := rnn.SaveOptions{}
+		if !*noSaveOpt {
+			saveOpts.Optimizer = opt
+		}
+		fmt.Printf("saving checkpoint to %q …\n", *savePath)
+		if err := rnn.Save(*savePath, model, saveOpts); err != nil {
+			log.Fatalf("save checkpoint: %v", err)
+		}
+		info, _ := os.Stat(*savePath)
+		fmt.Printf("checkpoint written (%.1f MB)\n", float64(info.Size())/1e6)
+	}
+
+	// ── sample ───────────────────────────────────────────────────────────
 	rng := rand.New(rand.NewSource(42))
 	seed, err := vocab.Encode("The ")
 	if err != nil {

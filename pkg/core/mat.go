@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	tileM = 32
-	tileK = 32
+	tileM = 64
+	tileK = 256
 )
 
 type Mat struct {
