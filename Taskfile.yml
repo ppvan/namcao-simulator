@@ -11,6 +11,9 @@ vars:
     - profile
     # - prime
 
+env:
+  GOEXPERIMENT: simd
+
 tasks:
   default:
     cmds:
