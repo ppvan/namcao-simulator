@@ -186,3 +186,11 @@ func IsNaN32(x float32) bool {
 // approximation, just avoids the float64 math.Inf(1) call + conversion).
 func PosInf32() float32 { return float32(math.Inf(1)) }
 func NegInf32() float32 { return float32(math.Inf(-1)) }
+
+func FastDSigmoid32(y float32) float32 {
+	return y * (1 - y)
+}
+
+func FastDTanh32(y float32) float32 {
+	return 1 - y*y
+}

@@ -6,15 +6,6 @@ import (
 
 type State []core.Mat
 
-type Cell interface {
-	InitState(batch int) State
-	Step(x core.Mat, prev State) (next State, cache core.Cache)
-	BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPrev State, grads core.Grads)
-	BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State)
-	Params() core.Params
-	SetParams(core.Params)
-}
-
 type RecurentCell struct {
 	Wx, Wh, Bh core.Mat
 
@@ -53,7 +44,7 @@ func (c *RecurentCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat,
 
 	// dz = dNext ⊙ (1 - hNext²) fused into one pass, without
 	// materializing the derivative matrix
-	dz := dNext[0].HadamardApply(cc.hNext, dTanh)
+	dz := dNext[0].HadamardApply(cc.hNext, core.FastDTanh32)
 
 	// TDot / DotT avoid materializing the transposed operands
 	dWx := cc.x.TDot(dz)
@@ -121,7 +112,7 @@ func (l *rnnLinear) SetParams(p core.Params) {
 
 func (c *RecurentCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State) {
 	cc := cache.(rnnCellCache)
-	dz := dNext[0].HadamardApply(cc.hNext, dTanh)
+	dz := dNext[0].HadamardApply(cc.hNext, core.FastDTanh32)
 	cc.x.TDotAccInto(dz, acc["Wx"])
 	cc.hPrev.TDotAccInto(dz, acc["Wh"])
 	dz.SumRowsInto(acc["bh"])

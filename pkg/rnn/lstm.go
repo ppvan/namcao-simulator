@@ -4,14 +4,6 @@ import (
 	"github.com/ppvan/gpt/pkg/core"
 )
 
-func dSigmoid(y float32) float32 {
-	return y * (1 - y)
-}
-
-func dTanh(y float32) float32 {
-	return 1 - y*y
-}
-
 // LSTMCell with fused gates: instead of 4 separate weight matrices per
 // input, the gates live side by side in single matrices, in the column
 // order f | i | o | g:
@@ -116,7 +108,7 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	dh, dcNext := dNext[0], dNext[1]
 
 	do := dh.Hadamard(cc.tanhC)
-	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, dTanh).AddInPlace(dcNext)
+	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
 	di := dc.Hadamard(cc.g)
@@ -127,10 +119,10 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	// the input, hidden, and weight gradients are 4 large matmuls
 	// instead of 16 small ones
 	dz := core.HStack(
-		df.HadamardApply(cc.f, dSigmoid),
-		di.HadamardApply(cc.i, dSigmoid),
-		do.HadamardApply(cc.o, dSigmoid),
-		dg.HadamardApply(cc.g, dTanh),
+		df.HadamardApply(cc.f, core.FastDSigmoid32),
+		di.HadamardApply(cc.i, core.FastDSigmoid32),
+		do.HadamardApply(cc.o, core.FastDSigmoid32),
+		dg.HadamardApply(cc.g, core.FastDTanh32),
 	)
 
 	dx = dz.DotT(c.W)
@@ -154,7 +146,7 @@ func (c *LSTMCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grad
 	dh, dcNext := dNext[0], dNext[1]
 
 	do := dh.Hadamard(cc.tanhC)
-	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, dTanh).AddInPlace(dcNext)
+	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
 	di := dc.Hadamard(cc.g)
@@ -162,10 +154,10 @@ func (c *LSTMCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grad
 	dcPrev := dc.Hadamard(cc.f)
 
 	dz := core.HStack(
-		df.HadamardApply(cc.f, dSigmoid),
-		di.HadamardApply(cc.i, dSigmoid),
-		do.HadamardApply(cc.o, dSigmoid),
-		dg.HadamardApply(cc.g, dTanh),
+		df.HadamardApply(cc.f, core.FastDSigmoid32),
+		di.HadamardApply(cc.i, core.FastDSigmoid32),
+		do.HadamardApply(cc.o, core.FastDSigmoid32),
+		dg.HadamardApply(cc.g, core.FastDTanh32),
 	)
 
 	dx = dz.DotT(c.W)
