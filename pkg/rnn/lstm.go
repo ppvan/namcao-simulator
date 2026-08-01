@@ -10,12 +10,7 @@ import (
 //
 //	W (inputSize, 4h), U (hiddenSize, 4h), B (1, 4h)
 //
-// Each Step then runs 2 large matmuls instead of 8 small ones. This is
-// the key change for CPU utilization: BPTT is sequential over time
-// steps, so the only parallelism available is *inside* each matmul, and
-// a (batch x in)·(in x 4h) product gives the column-splitting Dot four
-// times more width to spread across cores, with a quarter of the
-// goroutine spawn/join cycles.
+// [performance]
 type LSTMCell struct {
 	W core.Mat // input weights,  (inputSize, 4*hiddenSize)
 	U core.Mat // hidden weights, (hiddenSize, 4*hiddenSize)
@@ -30,33 +25,17 @@ type lstmCellCache struct {
 	cPrev core.Mat
 
 	// z is the fused post-activation matrix (batch, 4h), column layout f|i|o|g.
-	// Storing the whole matrix instead of four SliceCols copies means the
-	// backward pass can write dz directly into a pre-allocated (batch,4h) buffer
-	// without HStack or any intermediate allocation.
 	z core.Mat
 
 	tanhC core.Mat
 }
 
 func NewLSTMCell(inputSize, hiddenSize int) *LSTMCell {
-	// initialize each gate block independently so the per-gate Xavier
-	// scale matches the previous separate-matrix layout; forget-gate
-	// bias starts at 1 as before
-	ones := core.NewZeroMat(1, hiddenSize).Apply(func(float32) float32 { return 1 })
+	ones := core.NewZeroMat(1, hiddenSize).ApplyInPlace(func(float32) float32 { return 1 })
 	zeros := core.NewZeroMat(1, hiddenSize)
 	return &LSTMCell{
-		W: core.HStack(
-			core.XavierMat(inputSize, hiddenSize),
-			core.XavierMat(inputSize, hiddenSize),
-			core.XavierMat(inputSize, hiddenSize),
-			core.XavierMat(inputSize, hiddenSize),
-		),
-		U: core.HStack(
-			core.XavierMat(hiddenSize, hiddenSize),
-			core.XavierMat(hiddenSize, hiddenSize),
-			core.XavierMat(hiddenSize, hiddenSize),
-			core.XavierMat(hiddenSize, hiddenSize),
-		),
+		W: core.XavierMat(inputSize, hiddenSize*4),
+		U: core.XavierMat(hiddenSize, hiddenSize*4),
 		B: core.HStack(ones, zeros, zeros, zeros),
 
 		hiddenSize: hiddenSize,
@@ -177,17 +156,8 @@ func (c *LSTMCell) Params() core.Params {
 	return core.Params{"W": c.W, "U": c.U, "b": c.B}
 }
 
-// SetParams accepts either the fused layout ("W", "U", "b") or the
-// legacy per-gate layout ("Wf".."Wg", "Uf".."Ug", "bf".."bg"), so old
-// checkpoints keep loading; they are fused on the way in.
 func (c *LSTMCell) SetParams(p core.Params) {
-	if w, ok := p["W"]; ok {
-		c.W, c.U, c.B = w, p["U"], p["b"]
-		return
-	}
-	c.W = core.HStack(p["Wf"], p["Wi"], p["Wo"], p["Wg"])
-	c.U = core.HStack(p["Uf"], p["Ui"], p["Uo"], p["Ug"])
-	c.B = core.HStack(p["bf"], p["bi"], p["bo"], p["bg"])
+	c.W, c.U, c.B = p["W"], p["U"], p["b"]
 }
 
 func NewCharLSTM(vocabSize, embedSize, hiddenSize int) *CharRNN {
