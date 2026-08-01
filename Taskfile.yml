@@ -9,6 +9,7 @@ vars:
     - shakespeare
     - shakespeare-lstm
     - profile
+    - quirrell
     # - prime
 
 env:

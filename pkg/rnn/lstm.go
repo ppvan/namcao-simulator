@@ -29,10 +29,11 @@ type lstmCellCache struct {
 	hPrev core.Mat
 	cPrev core.Mat
 
-	f core.Mat
-	i core.Mat
-	o core.Mat
-	g core.Mat
+	// z is the fused post-activation matrix (batch, 4h), column layout f|i|o|g.
+	// Storing the whole matrix instead of four SliceCols copies means the
+	// backward pass can write dz directly into a pre-allocated (batch,4h) buffer
+	// without HStack or any intermediate allocation.
+	z core.Mat
 
 	tanhC core.Mat
 }
@@ -93,10 +94,7 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 		x:     x,
 		hPrev: hPrev,
 		cPrev: cPrev,
-		f:     f,
-		i:     i,
-		o:     o,
-		g:     g,
+		z:     z, // full (batch,4h) post-activation matrix
 		tanhC: tanhC,
 	}
 
@@ -106,24 +104,26 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPrev State, grads core.Grads) {
 	cc := cache.(lstmCellCache)
 	dh, dcNext := dNext[0], dNext[1]
+	h := c.hiddenSize
+
+	f := cc.z.SliceCols(0, h)
+	i := cc.z.SliceCols(h, 2*h)
+	o := cc.z.SliceCols(2*h, 3*h)
+	g := cc.z.SliceCols(3*h, 4*h)
 
 	do := dh.Hadamard(cc.tanhC)
-	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
+	dc := dh.Hadamard(o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
-	di := dc.Hadamard(cc.g)
-	dg := dc.Hadamard(cc.i)
-	dcPrev := dc.Hadamard(cc.f)
+	di := dc.Hadamard(g)
+	dg := dc.Hadamard(i)
+	dcPrev := dc.Hadamard(f)
 
-	// assemble all four gate gradients into one (batch, 4h) matrix so
-	// the input, hidden, and weight gradients are 4 large matmuls
-	// instead of 16 small ones
-	dz := core.HStack(
-		df.HadamardApply(cc.f, core.FastDSigmoid32),
-		di.HadamardApply(cc.i, core.FastDSigmoid32),
-		do.HadamardApply(cc.o, core.FastDSigmoid32),
-		dg.HadamardApply(cc.g, core.FastDTanh32),
-	)
+	dz := core.NewZeroMat(dh.Rows, 4*h)
+	dz.HadamardApplyWriteCols(0, df, f, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(h, di, i, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(2*h, do, o, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(3*h, dg, g, core.FastDTanh32)
 
 	dx = dz.DotT(c.W)
 	dhPrev := dz.DotT(c.U)
@@ -137,28 +137,31 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	return dx, State{dhPrev, dcPrev}, grads
 }
 
-// BackwardStepInto is BackwardStep with the weight gradients accumulated
-// straight into caller-owned buffers. At batch 1 the "U" gradient is a
-// (256,1024) rank-1 update: materialising it as a fresh matrix and then
-// adding it costs two 2 MB passes per time step and nothing else.
+// BackwardStepInto is the hot training path: weight gradients are accumulated
+// into caller-owned buffers (acc) rather than being returned as fresh matrices.
 func (c *LSTMCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State) {
 	cc := cache.(lstmCellCache)
 	dh, dcNext := dNext[0], dNext[1]
+	h := c.hiddenSize
+
+	f := cc.z.SliceCols(0, h)
+	i := cc.z.SliceCols(h, 2*h)
+	o := cc.z.SliceCols(2*h, 3*h)
+	g := cc.z.SliceCols(3*h, 4*h)
 
 	do := dh.Hadamard(cc.tanhC)
-	dc := dh.Hadamard(cc.o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
+	dc := dh.Hadamard(o).HadamardApply(cc.tanhC, core.FastDTanh32).AddInPlace(dcNext)
 
 	df := dc.Hadamard(cc.cPrev)
-	di := dc.Hadamard(cc.g)
-	dg := dc.Hadamard(cc.i)
-	dcPrev := dc.Hadamard(cc.f)
+	di := dc.Hadamard(g)
+	dg := dc.Hadamard(i)
+	dcPrev := dc.Hadamard(f)
 
-	dz := core.HStack(
-		df.HadamardApply(cc.f, core.FastDSigmoid32),
-		di.HadamardApply(cc.i, core.FastDSigmoid32),
-		do.HadamardApply(cc.o, core.FastDSigmoid32),
-		dg.HadamardApply(cc.g, core.FastDTanh32),
-	)
+	dz := core.NewZeroMat(dh.Rows, 4*h)
+	dz.HadamardApplyWriteCols(0, df, f, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(h, di, i, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(2*h, do, o, core.FastDSigmoid32)
+	dz.HadamardApplyWriteCols(3*h, dg, g, core.FastDTanh32)
 
 	dx = dz.DotT(c.W)
 	dhPrev := dz.DotT(c.U)

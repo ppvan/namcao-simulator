@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	tileM = 64
-	tileK = 256
+	tileM = 32
+	tileK = 32
 )
 
 type Mat struct {
@@ -326,6 +326,25 @@ func (mat Mat) ApplyColsInPlace(start, end int, fn func(float32) float32) Mat {
 		}
 	}
 	return mat
+}
+
+func (mat Mat) HadamardApplyWriteCols(start int, d, src Mat, fn func(float32) float32) {
+	cols := d.Columns
+	end := start + cols
+	if end > mat.Columns {
+		panic(fmt.Sprintf("HadamardApplyWriteCols: start %d + src.Columns %d exceeds mat.Columns %d", start, cols, mat.Columns))
+	}
+	if d.Rows != src.Rows || d.Columns != src.Columns {
+		panic(fmt.Sprintf("HadamardApplyWriteCols: d shape (%d,%d) != src shape (%d,%d)", d.Rows, d.Columns, src.Rows, src.Columns))
+	}
+	dw, sw := d.weights, src.weights
+	for i := 0; i < mat.Rows; i++ {
+		dst := mat.weights[i*mat.Columns+start : i*mat.Columns+end]
+		base := i * cols
+		for j := range dst {
+			dst[j] = dw[base+j] * fn(sw[base+j])
+		}
+	}
 }
 
 func (mat Mat) String() string {
