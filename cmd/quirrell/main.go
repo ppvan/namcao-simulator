@@ -288,8 +288,12 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 
 	model := res.Model
 	vocab := res.Vocab
-	fmt.Fprintf(os.Stderr, "quirrell: vocab %d | embed %d | hidden %d\n",
-		vocab.VocabSize(), model.Embed.Weights.Columns, model.HiddenSize())
+	totalParams := 0
+	for _, p := range model.Params() {
+		totalParams += p.Rows * p.Columns
+	}
+	fmt.Fprintf(os.Stderr, "quirrell: vocab %d | embed %d | hidden %d | param %d\n\n",
+		vocab.VocabSize(), model.Embed.Weights.Columns, model.HiddenSize(), totalParams)
 
 	// ── seed ──────────────────────────────────────────────────────────────
 	seedVal := cmd.Int("seed")
