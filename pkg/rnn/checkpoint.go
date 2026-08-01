@@ -19,7 +19,7 @@
 //	  "arch": { "vocab_size": int, "embed_size": int, "hidden_size": int },
 //	  "vocab": {
 //	    "char_to_idx": { "<char>": int, … },
-//	    "idx_to_char": [ int, … ]   // byte values as ints
+//	    "idx_to_char": [ int, … ]   // Unicode code points as ints
 //	  },
 //	  "tensors": {
 //	    "<param_name>": { "rows": int, "cols": int, "offset": int, "len": int }
@@ -83,7 +83,11 @@ type adamState struct {
 }
 
 // ckptVocab is the wire representation of data.Vocab embedded in the header.
-// Using []int for IdxToChar avoids JSON encoding byte arrays as base64.
+// Using []int for IdxToChar avoids ambiguity over encoding: each entry is a
+// Unicode code point (rune), stored as a plain int rather than raw bytes, so
+// multi-byte characters (e.g. Vietnamese diacritics) round-trip exactly.
+// CharToIdx keys are ordinary JSON strings holding exactly one rune each –
+// JSON is UTF-8 natively, so this needs no special handling for non-ASCII.
 type ckptVocab struct {
 	CharToIdx map[string]int `json:"char_to_idx"`
 	IdxToChar []int          `json:"idx_to_char"`
@@ -199,11 +203,13 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 			CharToIdx: make(map[string]int, len(opts.Vocab.CharToIdx)),
 			IdxToChar: make([]int, len(opts.Vocab.IdxToChar)),
 		}
-		for b, idx := range opts.Vocab.CharToIdx {
-			cv.CharToIdx[string([]byte{b})] = idx
+		for r, idx := range opts.Vocab.CharToIdx {
+			// string(rune) correctly UTF-8 encodes any code point, so this
+			// works unchanged for ASCII and multi-byte Vietnamese characters.
+			cv.CharToIdx[string(r)] = idx
 		}
-		for i, b := range opts.Vocab.IdxToChar {
-			cv.IdxToChar[i] = int(b)
+		for i, r := range opts.Vocab.IdxToChar {
+			cv.IdxToChar[i] = int(r)
 		}
 		hdrVocab = cv
 	}
@@ -345,16 +351,17 @@ func read(r io.Reader) (LoadResult, error) {
 	var restoredVocab *data.Vocab
 	if hdr.Vocab != nil {
 		cv := hdr.Vocab
-		charToIdx := make(map[byte]int, len(cv.CharToIdx))
+		charToIdx := make(map[rune]int, len(cv.CharToIdx))
 		for s, idx := range cv.CharToIdx {
-			if len(s) != 1 {
-				return LoadResult{}, fmt.Errorf("checkpoint load: vocab key %q is not a single byte", s)
+			rs := []rune(s)
+			if len(rs) != 1 {
+				return LoadResult{}, fmt.Errorf("checkpoint load: vocab key %q is not a single rune", s)
 			}
-			charToIdx[s[0]] = idx
+			charToIdx[rs[0]] = idx
 		}
-		idxToChar := make([]byte, len(cv.IdxToChar))
+		idxToChar := make([]rune, len(cv.IdxToChar))
 		for i, v := range cv.IdxToChar {
-			idxToChar[i] = byte(v)
+			idxToChar[i] = rune(v)
 		}
 		restoredVocab = &data.Vocab{CharToIdx: charToIdx, IdxToChar: idxToChar}
 	}

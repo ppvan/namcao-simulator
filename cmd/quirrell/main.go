@@ -345,18 +345,16 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 
 	return nil
 }
-
-// ── shared helper ─────────────────────────────────────────────────────────────
-
-// generateText encodes the prompt, runs the model, and returns prompt+generated text.
-// Unknown characters in the prompt are silently dropped with a warning.
 func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length int, temperature float32, rng *rand.Rand) string {
-	// encode prompt – skip any character not in vocab with a warning
+	// encode prompt – skip any character not in vocab with a warning.
+	// range over prompt yields one rune at a time (decoding UTF-8 as it
+	// goes), so multi-byte Vietnamese characters are looked up whole
+	// instead of being split into individual bytes.
 	var seedIDs []int
-	for i := 0; i < len(prompt); i++ {
-		id, ok := vocab.CharToIdx[prompt[i]]
+	for _, r := range prompt {
+		id, ok := vocab.CharToIdx[r]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "quirrell: warning: character %q not in vocabulary, skipping\n", prompt[i])
+			fmt.Fprintf(os.Stderr, "quirrell: warning: character %q not in vocabulary, skipping\n", r)
 			continue
 		}
 		seedIDs = append(seedIDs, id)

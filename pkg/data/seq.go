@@ -7,8 +7,8 @@ import (
 )
 
 type Vocab struct {
-	CharToIdx map[byte]int
-	IdxToChar []byte
+	CharToIdx map[rune]int
+	IdxToChar []rune
 }
 
 func LoadText(path string) (string, error) {
@@ -20,18 +20,18 @@ func LoadText(path string) (string, error) {
 }
 
 func BuildVocab(text string) *Vocab {
-	seen := make(map[byte]struct{})
-	for i := 0; i < len(text); i++ {
-		seen[text[i]] = struct{}{}
+	seen := make(map[rune]struct{})
+	for _, r := range text {
+		seen[r] = struct{}{}
 	}
 
-	chars := make([]byte, 0, len(seen))
+	chars := make([]rune, 0, len(seen))
 	for c := range seen {
 		chars = append(chars, c)
 	}
 	slices.Sort(chars)
 
-	charToIdx := make(map[byte]int, len(chars))
+	charToIdx := make(map[rune]int, len(chars))
 	for i, c := range chars {
 		charToIdx[c] = i
 	}
@@ -43,32 +43,34 @@ func (v *Vocab) VocabSize() int {
 	return len(v.IdxToChar)
 }
 
+// Encode converts text into a slice of vocabulary ids, one per rune (not per
+// byte), so a multi-byte UTF-8 character like "ệ" becomes a single id.
 func (v *Vocab) Encode(text string) ([]int, error) {
-	ids := make([]int, len(text))
-	for i := 0; i < len(text); i++ {
-		id, ok := v.CharToIdx[text[i]]
+	ids := make([]int, 0, len(text))
+	for i, r := range text {
+		id, ok := v.CharToIdx[r]
 		if !ok {
-			return nil, fmt.Errorf("data: byte %q at offset %d is not in the vocabulary", text[i], i)
+			return nil, fmt.Errorf("data: rune %q at byte offset %d is not in the vocabulary", r, i)
 		}
-		ids[i] = id
+		ids = append(ids, id)
 	}
 	return ids, nil
 }
 
 func Encode(text string, v *Vocab) []int {
-	ids := make([]int, len(text))
-	for i := 0; i < len(text); i++ {
-		ids[i] = v.CharToIdx[text[i]]
+	ids := make([]int, 0, len(text))
+	for _, r := range text {
+		ids = append(ids, v.CharToIdx[r])
 	}
 	return ids
 }
 
 func Decode(ids []int, v *Vocab) string {
-	b := make([]byte, len(ids))
+	rs := make([]rune, len(ids))
 	for i, id := range ids {
-		b[i] = v.IdxToChar[id]
+		rs[i] = v.IdxToChar[id]
 	}
-	return string(b)
+	return string(rs)
 }
 
 func SplitData(ids []int, trainRatio float32) (train, val []int) {
@@ -92,6 +94,10 @@ func SplitData(ids []int, trainRatio float32) (train, val []int) {
 // Chunking (rather than sliding B adjacent windows) is what makes the streams
 // decorrelated: at any step the B rows come from B distant parts of the text,
 // so the gradient is an average over genuinely different contexts.
+//
+// Note: ids here are vocabulary ids (one per rune), already produced by
+// Encode/(*Vocab).Encode, so this type is Unicode-agnostic — it never touches
+// raw bytes or runes itself.
 type SeqBatcher struct {
 	ids    []int
 	batch  int
@@ -181,17 +187,4 @@ func (b *SeqBatcher) Next() (xs, ys [][]int, wrapped bool) {
 
 	b.offset += b.seqLen
 	return b.xrows, b.yrows, wrapped
-}
-
-func NextBatch(ids []int, pos, seqLen int) (xs, ys []int, nextPos int, wrapped bool) {
-	if len(ids) < seqLen+1 {
-		panic(fmt.Sprintf("data: need at least %d ids for seqLen %d, got %d", seqLen+1, seqLen, len(ids)))
-	}
-	if pos < 0 || pos+seqLen+1 > len(ids) {
-		pos = 0
-		wrapped = true
-	}
-	xs = ids[pos : pos+seqLen]
-	ys = ids[pos+1 : pos+seqLen+1]
-	return xs, ys, pos + seqLen, wrapped
 }
