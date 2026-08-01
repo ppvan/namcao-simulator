@@ -9,36 +9,50 @@ import (
 	"github.com/ppvan/gpt/pkg/data"
 )
 
-func toTimeMajor(ids []int) [][]int {
-	xsIDs := make([][]int, len(ids))
-	for t, id := range ids {
-		xsIDs[t] = []int{id}
+// writeTargets fills dst, a (batch, 1) class-index column, from one timestep's
+// targets. CrossEntropy takes targets in this shape.
+func writeTargets(dst core.Mat, ids []int) {
+	for i, id := range ids {
+		dst.Set(i, 0, float32(id))
 	}
-	return xsIDs
 }
 
-func targetMat(id int) core.Mat {
-	m := core.NewZeroMat(1, 1)
-	m.Set(0, 0, float32(id))
-	return m
-}
-
-func LossAndGrad(logits []core.Mat, ys []int) (loss float32, dLogits []core.Mat, err error) {
-	T := len(logits)
+// checkSeq validates the shapes shared by the loss entry points and returns the
+// sequence length and batch size.
+func checkSeq(logits []core.Mat, ys [][]int) (T, batch int, err error) {
+	T = len(logits)
 	if T == 0 {
-		return 0, nil, errors.New("rnn: empty sequence")
+		return 0, 0, errors.New("rnn: empty sequence")
 	}
 	if len(ys) != T {
-		return 0, nil, fmt.Errorf("rnn: %d logits but %d targets", T, len(ys))
+		return 0, 0, fmt.Errorf("rnn: %d logits but %d target steps", T, len(ys))
+	}
+	batch = logits[0].Rows
+	for t := range logits {
+		if logits[t].Rows != batch {
+			return 0, 0, fmt.Errorf("rnn: step %d has batch %d, expected %d", t, logits[t].Rows, batch)
+		}
+		if len(ys[t]) != batch {
+			return 0, 0, fmt.Errorf("rnn: step %d has %d targets for batch %d", t, len(ys[t]), batch)
+		}
+	}
+	return T, batch, nil
+}
+
+func LossAndGrad(logits []core.Mat, ys [][]int) (loss float32, dLogits []core.Mat, err error) {
+	T, batch, err := checkSeq(logits, ys)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	ce := core.CrossEntropy()
 	dLogits = make([]core.Mat, T)
 	scale := 1.0 / float32(T)
+	target := core.NewZeroMat(batch, 1) // refilled per step, read immediately
 
 	var total float32
 	for t, y := range logits {
-		target := targetMat(ys[t])
+		writeTargets(target, ys[t])
 
 		l, ferr := ce.Forward(y, target)
 		if ferr != nil {
@@ -54,6 +68,29 @@ func LossAndGrad(logits []core.Mat, ys []int) (loss float32, dLogits []core.Mat,
 	}
 
 	return total * scale, dLogits, nil
+}
+
+// SeqLoss is the forward-only half of LossAndGrad, for evaluation.
+func SeqLoss(logits []core.Mat, ys [][]int) (float32, error) {
+	T, batch, err := checkSeq(logits, ys)
+	if err != nil {
+		return 0, err
+	}
+
+	ce := core.CrossEntropy()
+	target := core.NewZeroMat(batch, 1)
+
+	var total float32
+	for t, y := range logits {
+		writeTargets(target, ys[t])
+		l, ferr := ce.Forward(y, target)
+		if ferr != nil {
+			return 0, ferr
+		}
+		total += l.Mean()
+	}
+
+	return total / float32(T), nil
 }
 
 func ClipGrads(grads core.Grads, maxNorm float32) core.Grads {
@@ -78,8 +115,10 @@ func ClipGrads(grads core.Grads, maxNorm float32) core.Grads {
 	return grads
 }
 
-func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm float32) (loss float32, sFinal State, err error) {
-	logits, s, cache := m.ForwardSeq(toTimeMajor(xs), s0)
+// FitStep runs one forward/backward/update over a time-major minibatch:
+// xs[t] and ys[t] each hold one id per stream, so xs is (seqLen, batch).
+func (m *CharRNN) FitStep(xs, ys [][]int, s0 State, opt core.Optimizer, clipNorm float32) (loss float32, sFinal State, err error) {
+	logits, s, cache := m.ForwardSeq(xs, s0)
 
 	loss, dLogits, err := LossAndGrad(logits, ys)
 	if err != nil {
@@ -98,25 +137,40 @@ func (m *CharRNN) FitStep(xs, ys []int, s0 State, opt core.Optimizer, clipNorm f
 	return loss, s, nil
 }
 
-func (m *CharRNN) EvalLoss(ids []int, seqLen, maxWindows int) (float32, error) {
-	if len(ids) < seqLen+1 {
-		return 0, errors.New("rnn: not enough data to evaluate")
+// EvalLoss averages the validation loss over up to maxWindows minibatches.
+// If the split is too small to feed the requested batch size the batch is
+// halved until it fits, so a large training batch never breaks evaluation.
+func (m *CharRNN) EvalLoss(ids []int, batch, seqLen, maxWindows int) (float32, error) {
+	if batch <= 0 {
+		batch = 1
 	}
 
-	s := m.InitState(1)
-	pos := 0
+	var (
+		eb  *data.SeqBatcher
+		err error
+	)
+	for ; batch >= 1; batch /= 2 {
+		eb, err = data.NewSeqBatcher(ids, batch, seqLen)
+		if err == nil {
+			break
+		}
+	}
+	if eb == nil {
+		return 0, fmt.Errorf("rnn: not enough data to evaluate: %w", err)
+	}
+
+	s := m.InitState(eb.Batch())
 	var total float32
 	windows := 0
 
 	for windows < maxWindows {
-		xs, ys, next, wrapped := data.NextBatch(ids, pos, seqLen)
+		xs, ys, wrapped := eb.Next()
 		if wrapped && windows > 0 {
 			break
 		}
-		pos = next
 
-		logits, sNext, _ := m.ForwardSeq(toTimeMajor(xs), s)
-		loss, _, err := LossAndGrad(logits, ys)
+		logits, sNext, _ := m.ForwardSeq(xs, s)
+		loss, err := SeqLoss(logits, ys)
 		if err != nil {
 			return 0, err
 		}
@@ -133,6 +187,7 @@ func (m *CharRNN) EvalLoss(ids []int, seqLen, maxWindows int) (float32, error) {
 }
 
 type TrainConfig struct {
+	Batch       int
 	SeqLen      int
 	Steps       int
 	ClipNorm    float32
@@ -143,6 +198,7 @@ type TrainConfig struct {
 
 func DefaultTrainConfig() TrainConfig {
 	return TrainConfig{
+		Batch:       32,
 		SeqLen:      25,
 		Steps:       10000,
 		ClipNorm:    5.0,
@@ -156,21 +212,29 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 	if cfg.SeqLen <= 0 || cfg.Steps <= 0 {
 		return errors.New("rnn: SeqLen and Steps must be positive")
 	}
-	if len(train) < cfg.SeqLen+1 {
-		return errors.New("rnn: training data shorter than one window")
+
+	if cfg.Batch <= 0 {
+		return errors.New("rnn: Batch must be positive")
 	}
 
-	s := m.InitState(1)
-	pos := 0
+	batch := cfg.Batch
+	tb, err := data.NewSeqBatcher(train, batch, cfg.SeqLen)
+	if err != nil {
+		return fmt.Errorf("rnn: %w", err)
+	}
+
+	perEpoch := tb.WindowsPerEpoch()
+	s := m.InitState(batch)
 	var running float32 = 0.0
 	seen := 0
 
 	for step := 1; step <= cfg.Steps; step++ {
-		xs, ys, next, wrapped := data.NextBatch(train, pos, cfg.SeqLen)
+		xs, ys, wrapped := tb.Next()
 		if wrapped {
-			s = m.InitState(1)
+			// every stream jumped back to the head of its chunk, so the
+			// carried hidden state no longer describes the current context
+			s = m.InitState(batch)
 		}
-		pos = next
 
 		loss, sNext, err := m.FitStep(xs, ys, s, opt, cfg.ClipNorm)
 		if err != nil {
@@ -182,7 +246,8 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 		seen++
 
 		if cfg.LogEvery > 0 && step%cfg.LogEvery == 0 {
-			fmt.Printf("step %d: train loss %.4f\n", step, running/float32(seen))
+			epoch := float64(step) / float64(perEpoch)
+			fmt.Printf("step %d (epoch %.2f): train loss %.4f\n", step, epoch, running/float32(seen))
 			running, seen = 0, 0
 		}
 
@@ -191,7 +256,7 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 			if windows <= 0 {
 				windows = 100
 			}
-			vLoss, err := m.EvalLoss(val, cfg.SeqLen, windows)
+			vLoss, err := m.EvalLoss(val, batch, cfg.SeqLen, windows)
 			if err != nil {
 				return fmt.Errorf("rnn: step %d eval: %w", step, err)
 			}

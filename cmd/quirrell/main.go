@@ -69,9 +69,14 @@ func trainCmd() *cli.Command {
 				Usage: "LSTM hidden state dimension",
 			},
 			&cli.IntFlag{
+				Name:  "batch",
+				Value: 32,
+				Usage: "parallel streams per step (1 = old single-stream behaviour)",
+			},
+			&cli.IntFlag{
 				Name:  "seqlen",
 				Value: 100,
-				Usage: "BPTT sequence length (chars per training step)",
+				Usage: "BPTT sequence length (chars per stream per step)",
 			},
 			&cli.IntFlag{
 				Name:  "steps",
@@ -181,12 +186,20 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	}
 	seqLen := int(cmd.Int("seqlen"))
 	steps := int(cmd.Int("steps"))
-	fmt.Printf("quirrell: embed %d | hidden %d | params %d | seq %d | steps %d\n",
+	batch := int(cmd.Int("batch"))
+	if batch < 1 {
+		batch = 1
+	}
+	fmt.Printf("quirrell: embed %d | hidden %d | params %d | batch %d | seq %d | steps %d\n",
 		model.Embed.Weights.Columns, model.HiddenSize(),
-		totalParams, seqLen, steps)
+		totalParams, batch, seqLen, steps)
+	fmt.Printf("quirrell: %d chars/step, %d chars total (%.1f epochs over %d train chars)\n",
+		batch*seqLen, batch*seqLen*steps,
+		float64(batch*seqLen*steps)/float64(len(train)), len(train))
 
 	// ── train ─────────────────────────────────────────────────────────────
 	cfg := rnn.TrainConfig{
+		Batch:       batch,
 		SeqLen:      seqLen,
 		Steps:       steps,
 		ClipNorm:    float32(cmd.Float("clip")),
@@ -200,9 +213,10 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("training: %w", err)
 	}
 	elapsed := time.Since(start)
-	fmt.Printf("\nquirrell: training finished in %s (%.1f steps/s)\n",
+	fmt.Printf("\nquirrell: training finished in %s (%.1f steps/s, %.0f chars/s)\n",
 		elapsed.Round(time.Second),
-		float64(steps)/elapsed.Seconds())
+		float64(steps)/elapsed.Seconds(),
+		float64(steps*batch*seqLen)/elapsed.Seconds())
 
 	// ── save checkpoint ───────────────────────────────────────────────────
 	saveOpts := rnn.SaveOptions{Vocab: vocab}

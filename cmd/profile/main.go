@@ -20,6 +20,7 @@ func main() {
 	memprofile := flag.String("memprofile", "", "write heap profile to file")
 	traceFile := flag.String("trace", "", "write execution trace to file")
 	steps := flag.Int("steps", 2000, "override training steps for a shorter profiling run")
+	batch := flag.Int("batch", 32, "parallel streams per step (1 = old single-stream behaviour)")
 	skipSample := flag.Bool("skip-sample", true, "skip generation/sampling after training (default: skip, since it's not the bottleneck)")
 	flag.Parse()
 
@@ -65,6 +66,7 @@ func main() {
 	opt := core.NewAdam(0.002, 0.9, 0.999, 1e-8)
 
 	cfg := rnn.TrainConfig{
+		Batch:       *batch,
 		SeqLen:      100,
 		Steps:       *steps, // overridden — keep this short for profiling runs
 		ClipNorm:    5.0,
@@ -77,7 +79,8 @@ func main() {
 	for _, p := range model.Params() {
 		params += p.Rows * p.Columns
 	}
-	fmt.Printf("lstm: embed 32, hidden 256, %d params, profiling %d steps\n", params, cfg.Steps)
+	fmt.Printf("lstm: embed 32, hidden 256, %d params, batch %d, profiling %d steps (%d chars)\n",
+		params, cfg.Batch, cfg.Steps, cfg.Batch*cfg.SeqLen*cfg.Steps)
 
 	if err := model.Train(train, val, opt, cfg); err != nil {
 		log.Fatalf("train: %v", err)
