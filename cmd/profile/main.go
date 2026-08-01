@@ -19,7 +19,8 @@ func main() {
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to file")
 	memprofile := flag.String("memprofile", "", "write heap profile to file")
 	traceFile := flag.String("trace", "", "write execution trace to file")
-	steps := flag.Int("steps", 2000, "override training steps for a shorter profiling run")
+	epochs := flag.Float64("epochs", 0.5, "corpus passes to profile; keep short")
+	seqlen := flag.Int("seqlen", 100, "BPTT length; batch*seqlen sets the live cache footprint")
 	batch := flag.Int("batch", 32, "parallel streams per step (1 = old single-stream behaviour)")
 	skipSample := flag.Bool("skip-sample", true, "skip generation/sampling after training (default: skip, since it's not the bottleneck)")
 	flag.Parse()
@@ -67,11 +68,11 @@ func main() {
 
 	cfg := rnn.TrainConfig{
 		Batch:       *batch,
-		SeqLen:      100,
-		Steps:       *steps, // overridden — keep this short for profiling runs
+		SeqLen:      *seqlen,
+		Epochs:      *epochs,
 		ClipNorm:    5.0,
-		LogEvery:    200,
-		EvalEvery:   1 << 30, // effectively disable eval during profiling, it pollutes the profile
+		LogEvery:    0.25,
+		EvalEvery:   -1, // eval pollutes the profile
 		EvalWindows: 50,
 	}
 
@@ -79,8 +80,8 @@ func main() {
 	for _, p := range model.Params() {
 		params += p.Rows * p.Columns
 	}
-	fmt.Printf("lstm: embed 32, hidden 256, %d params, batch %d, profiling %d steps (%d chars)\n",
-		params, cfg.Batch, cfg.Steps, cfg.Batch*cfg.SeqLen*cfg.Steps)
+	fmt.Printf("lstm: embed 32, hidden 256, %d params, batch %d, profiling %.2f epochs (%d chars)\n",
+		params, cfg.Batch, cfg.Epochs, int(cfg.Epochs*float64(len(train))))
 
 	if err := model.Train(train, val, opt, cfg); err != nil {
 		log.Fatalf("train: %v", err)

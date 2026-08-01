@@ -27,11 +27,10 @@ func main() {
 	opt := core.NewAdam(0.001, 0.9, 0.999, 1e-8)
 
 	cfg := rnn.TrainConfig{
-		SeqLen:      25,
-		Steps:       20000,
+		Batch:       16,
+		SeqLen:      50,
+		Epochs:      10,
 		ClipNorm:    5.0,
-		LogEvery:    100,
-		EvalEvery:   1000,
 		EvalWindows: 100,
 	}
 

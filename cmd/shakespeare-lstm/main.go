@@ -60,11 +60,10 @@ func main() {
 
 	// ── training config ───────────────────────────────────────────────────
 	cfg := rnn.TrainConfig{
+		Batch:       16,
 		SeqLen:      100,
-		Steps:       20000,
+		Epochs:      20,
 		ClipNorm:    5.0,
-		LogEvery:    200,
-		EvalEvery:   2000,
 		EvalWindows: 50,
 	}
 
@@ -72,9 +71,9 @@ func main() {
 	for _, p := range model.Params() {
 		params += p.Rows * p.Columns
 	}
-	fmt.Printf("lstm: embed %d, hidden %d, %d params, %d chars seen over %d steps\n",
+	fmt.Printf("lstm: embed %d, hidden %d, %d params, batch %d, %.0f epochs (%d chars)\n",
 		model.Embed.Weights.Columns, model.HiddenSize(),
-		params, cfg.SeqLen*cfg.Steps, cfg.Steps)
+		params, cfg.Batch, cfg.Epochs, int(cfg.Epochs*float64(len(train))))
 
 	if err := model.Train(train, val, opt, cfg); err != nil {
 		log.Fatalf("train: %v", err)

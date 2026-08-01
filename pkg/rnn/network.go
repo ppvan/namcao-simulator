@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"time"
 
 	"github.com/ppvan/gpt/pkg/core"
 	"github.com/ppvan/gpt/pkg/data"
@@ -187,30 +188,55 @@ func (m *CharRNN) EvalLoss(ids []int, batch, seqLen, maxWindows int) (float32, e
 }
 
 type TrainConfig struct {
-	Batch       int
-	SeqLen      int
-	Steps       int
-	ClipNorm    float32
-	LogEvery    int
-	EvalEvery   int
+	Batch  int
+	SeqLen int
+
+	// Epochs is the training budget: passes over the corpus. A step consumes
+	// Batch*SeqLen characters, so a raw step count means different amounts of
+	// training at different batch sizes; epochs do not. Changing Batch changes
+	// how fast the run goes, not how much training happens.
+	Epochs float64
+
+	ClipNorm float32
+
+	// LogEvery and EvalEvery are intervals in epochs, for the same reason.
+	// Zero selects the default (ten log lines per epoch, one eval per epoch);
+	// negative disables.
+	LogEvery  float64
+	EvalEvery float64
+
 	EvalWindows int
+}
+
+// epochsToSteps turns an epoch-relative interval into a step count. Zero takes
+// def; negative disables and returns 0.
+func epochsToSteps(every, def float64, perEpoch int) int {
+	if every < 0 {
+		return 0
+	}
+	if every == 0 {
+		every = def
+	}
+	return max(1, int(every*float64(perEpoch)))
 }
 
 func DefaultTrainConfig() TrainConfig {
 	return TrainConfig{
-		Batch:       32,
-		SeqLen:      25,
-		Steps:       10000,
+		Batch:       16,
+		SeqLen:      100,
+		Epochs:      20,
 		ClipNorm:    5.0,
-		LogEvery:    100,
-		EvalEvery:   1000,
 		EvalWindows: 100,
 	}
 }
 
 func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) error {
-	if cfg.SeqLen <= 0 || cfg.Steps <= 0 {
-		return errors.New("rnn: SeqLen and Steps must be positive")
+	if cfg.SeqLen <= 0 {
+		return errors.New("rnn: SeqLen must be positive")
+	}
+
+	if cfg.Epochs <= 0 {
+		return errors.New("rnn: Epochs must be positive")
 	}
 
 	if cfg.Batch <= 0 {
@@ -224,11 +250,17 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 	}
 
 	perEpoch := tb.WindowsPerEpoch()
+
+	steps := max(1, int(cfg.Epochs*float64(perEpoch)))
+	logEvery := epochsToSteps(cfg.LogEvery, 0.1, perEpoch)
+	evalEvery := epochsToSteps(cfg.EvalEvery, 1, perEpoch)
+
 	s := m.InitState(batch)
 	var running float32 = 0.0
 	seen := 0
+	lastLog := time.Now()
 
-	for step := 1; step <= cfg.Steps; step++ {
+	for step := 1; step <= steps; step++ {
 		xs, ys, wrapped := tb.Next()
 		if wrapped {
 			// every stream jumped back to the head of its chunk, so the
@@ -245,13 +277,17 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 		running += loss
 		seen++
 
-		if cfg.LogEvery > 0 && step%cfg.LogEvery == 0 {
-			epoch := float64(step) / float64(perEpoch)
-			fmt.Printf("step %d (epoch %.2f): train loss %.4f\n", step, epoch, running/float32(seen))
+		if logEvery > 0 && step%logEvery == 0 {
+			// chars/s is the only throughput number comparable across batch
+			// sizes; steps/s is not.
+			cps := float64(seen*batch*cfg.SeqLen) / time.Since(lastLog).Seconds()
+			fmt.Printf("step %d (epoch %.2f): train loss %.4f | %.0f chars/s\n",
+				step, float64(step)/float64(perEpoch), running/float32(seen), cps)
 			running, seen = 0, 0
+			lastLog = time.Now()
 		}
 
-		if cfg.EvalEvery > 0 && step%cfg.EvalEvery == 0 && len(val) > cfg.SeqLen {
+		if evalEvery > 0 && step%evalEvery == 0 && len(val) > cfg.SeqLen {
 			windows := cfg.EvalWindows
 			if windows <= 0 {
 				windows = 100
@@ -260,7 +296,8 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 			if err != nil {
 				return fmt.Errorf("rnn: step %d eval: %w", step, err)
 			}
-			fmt.Printf("step %d: val loss %.4f\n", step, vLoss)
+			fmt.Printf("step %d (epoch %.2f): val loss %.4f\n",
+				step, float64(step)/float64(perEpoch), vLoss)
 		}
 	}
 

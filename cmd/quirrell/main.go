@@ -78,10 +78,10 @@ func trainCmd() *cli.Command {
 				Value: 100,
 				Usage: "BPTT sequence length (chars per stream per step)",
 			},
-			&cli.IntFlag{
-				Name:  "steps",
-				Value: 20000,
-				Usage: "number of gradient-update steps",
+			&cli.Float64Flag{
+				Name:  "epochs",
+				Value: 20,
+				Usage: "passes over the corpus (the training budget)",
 			},
 			&cli.Float64Flag{
 				Name:  "lr",
@@ -93,15 +93,15 @@ func trainCmd() *cli.Command {
 				Value: 5.0,
 				Usage: "gradient-norm clip threshold (0 = disabled)",
 			},
-			&cli.IntFlag{
-				Name:  "log-every",
-				Value: 200,
-				Usage: "print train loss every N steps (0 = silent)",
+			&cli.Float64Flag{
+				Name:  "log-every-epochs",
+				Value: 0,
+				Usage: "epochs between train-loss lines (0 = ten per epoch, negative = silent)",
 			},
-			&cli.IntFlag{
-				Name:  "eval-every",
-				Value: 2000,
-				Usage: "evaluate validation loss every N steps (0 = disabled)",
+			&cli.Float64Flag{
+				Name:  "eval-every-epochs",
+				Value: 1,
+				Usage: "epochs between validation passes (negative = disabled)",
 			},
 			&cli.IntFlag{
 				Name:  "eval-windows",
@@ -185,26 +185,32 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		totalParams += p.Rows * p.Columns
 	}
 	seqLen := int(cmd.Int("seqlen"))
-	steps := int(cmd.Int("steps"))
+	epochs := cmd.Float("epochs")
 	batch := int(cmd.Int("batch"))
 	if batch < 1 {
 		batch = 1
 	}
-	fmt.Printf("quirrell: embed %d | hidden %d | params %d | batch %d | seq %d | steps %d\n",
-		model.Embed.Weights.Columns, model.HiddenSize(),
-		totalParams, batch, seqLen, steps)
-	fmt.Printf("quirrell: %d chars/step, %d chars total (%.1f epochs over %d train chars)\n",
-		batch*seqLen, batch*seqLen*steps,
-		float64(batch*seqLen*steps)/float64(len(train)), len(train))
+
+	// The live BPTT cache stays resident between forward and backward. Once
+	// batch*seqLen pushes it past L3 the backward pass becomes a DRAM stream
+	// and chars/s drops, so surface it before committing to a long run.
+	hidden := model.HiddenSize()
+	cacheMB := float64(batch*seqLen*(7*hidden+model.Embed.Weights.Columns)*4) / 1e6
+
+	totalChars := int(epochs * float64(len(train)))
+	fmt.Printf("quirrell: embed %d | hidden %d | params %d | batch %d | seq %d\n",
+		model.Embed.Weights.Columns, hidden, totalParams, batch, seqLen)
+	fmt.Printf("quirrell: %d chars/step | BPTT cache %.1f MB | %.1f epochs (%d chars)\n",
+		batch*seqLen, cacheMB, float64(totalChars)/float64(len(train)), totalChars)
 
 	// ── train ─────────────────────────────────────────────────────────────
 	cfg := rnn.TrainConfig{
 		Batch:       batch,
 		SeqLen:      seqLen,
-		Steps:       steps,
+		Epochs:      epochs,
 		ClipNorm:    float32(cmd.Float("clip")),
-		LogEvery:    int(cmd.Int("log-every")),
-		EvalEvery:   int(cmd.Int("eval-every")),
+		LogEvery:    cmd.Float("log-every-epochs"),
+		EvalEvery:   cmd.Float("eval-every-epochs"),
 		EvalWindows: int(cmd.Int("eval-windows")),
 	}
 
@@ -213,10 +219,9 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("training: %w", err)
 	}
 	elapsed := time.Since(start)
-	fmt.Printf("\nquirrell: training finished in %s (%.1f steps/s, %.0f chars/s)\n",
+	fmt.Printf("\nquirrell: training finished in %s (%.0f chars/s)\n",
 		elapsed.Round(time.Second),
-		float64(steps)/elapsed.Seconds(),
-		float64(steps*batch*seqLen)/elapsed.Seconds())
+		float64(totalChars)/elapsed.Seconds())
 
 	// ── save checkpoint ───────────────────────────────────────────────────
 	saveOpts := rnn.SaveOptions{Vocab: vocab}
