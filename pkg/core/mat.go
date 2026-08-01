@@ -422,6 +422,19 @@ func (mat Mat) ScaleInPlace(s float32) Mat {
 	return mat
 }
 
+// SumSquares64 returns the sum of squared elements accumulated in float64.
+// A float32 accumulator overflows to +Inf once any single element exceeds
+// ~1.8e19, which silently destroys gradient-norm clipping; float64 has the
+// headroom to represent the norm of anything a float32 matrix can hold.
+func (mat Mat) SumSquares64() float64 {
+	var sum float64
+	for _, v := range mat.weights {
+		f := float64(v)
+		sum += f * f
+	}
+	return sum
+}
+
 // SumSquares returns the sum of squared elements [performance]
 func (mat Mat) SumSquares() float32 {
 	var s0, s1 float32

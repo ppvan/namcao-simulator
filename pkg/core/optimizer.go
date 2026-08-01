@@ -160,8 +160,8 @@ func (a *Adam) Update(name string, param, grad Mat) Mat {
 	a.t[name]++
 	t := a.t[name]
 
-	corr1 := 1 - FastPow32(a.Beta1, float32(t))
-	corr2 := 1 - FastPow32(a.Beta2, float32(t))
+	corr1 := 1 - PowIntApprox32(a.Beta1, t)
+	corr2 := 1 - PowIntApprox32(a.Beta2, t)
 
 	// One fused pass over the parameter instead of twelve allocating ones.
 	// m and v are updated in place and kept across steps.

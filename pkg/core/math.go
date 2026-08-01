@@ -34,6 +34,12 @@ func FastExp32(x float32) float32 {
 		return 0
 	}
 	i := int32(expA32*x) + expB32
+	if i <= 0 {
+		// The -88 guard above is slightly too generous: the bit pattern goes
+		// negative at x ~= -87.988, and uint32(negative) is a NaN/-Inf
+		// encoding. Underflow to zero instead.
+		return 0
+	}
 	return math.Float32frombits(uint32(i))
 }
 

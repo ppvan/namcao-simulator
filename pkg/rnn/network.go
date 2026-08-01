@@ -3,6 +3,7 @@ package rnn
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"time"
 
@@ -94,26 +95,45 @@ func SeqLoss(logits []core.Mat, ys [][]int) (float32, error) {
 	return total / float32(T), nil
 }
 
-func ClipGrads(grads core.Grads, maxNorm float32) core.Grads {
-	if maxNorm <= 0 {
-		return grads
-	}
+// ErrNonFiniteGrad reports a step whose gradients contained NaN or Inf. The
+// update is skipped rather than applied: a single non-finite entry poisons
+// every parameter it touches, and Adam's moment buffers then keep it alive
+// forever, so the run never recovers.
+var ErrNonFiniteGrad = errors.New("rnn: non-finite gradients, update skipped")
 
-	var sumSq float32
+// ClipGrads rescales grads in place so their global L2 norm is at most
+// maxNorm, and reports whether they were finite.
+//
+// The norm is accumulated in float64 deliberately. With a float32 accumulator
+// a single gradient element above ~1.8e19 overflows the sum of squares to
+// +Inf, FastSqrt32(+Inf) returns -Inf, and -Inf <= maxNorm reads as "small
+// enough, no clipping needed" -- so clipping switched itself off at exactly
+// the moment it was needed. float64 has the headroom to hold the norm of any
+// float32 matrix, and math.Sqrt is exact; this runs once per step over the
+// whole parameter set, so its cost is noise next to the matmuls.
+func ClipGrads(grads core.Grads, maxNorm float32) (core.Grads, bool) {
+	var sumSq float64
 	for _, g := range grads {
-		sumSq += g.SumSquares()
-	}
-	norm := core.FastSqrt32(sumSq)
-
-	if norm <= maxNorm || norm == 0 || core.IsNaN32(norm) {
-		return grads
+		sumSq += g.SumSquares64()
 	}
 
-	scale := maxNorm / norm
+	if math.IsNaN(sumSq) || math.IsInf(sumSq, 0) {
+		return grads, false
+	}
+	if maxNorm <= 0 {
+		return grads, true
+	}
+
+	norm := math.Sqrt(sumSq)
+	if norm <= float64(maxNorm) || norm == 0 {
+		return grads, true
+	}
+
+	scale := float32(float64(maxNorm) / norm)
 	for _, g := range grads {
 		g.ScaleInPlace(scale)
 	}
-	return grads
+	return grads, true
 }
 
 // FitStep runs one forward/backward/update over a time-major minibatch:
@@ -127,7 +147,14 @@ func (m *CharRNN) FitStep(xs, ys [][]int, s0 State, opt core.Optimizer, clipNorm
 	}
 
 	grads, _ := m.BackwardSeq(cache, dLogits)
-	grads = ClipGrads(grads, clipNorm)
+
+	grads, finite := ClipGrads(grads, clipNorm)
+	if !finite || math.IsNaN(float64(loss)) || math.IsInf(float64(loss), 0) {
+		// Leave the parameters untouched and hand the caller a fresh state:
+		// whatever produced this is in the carried activations, not the
+		// weights, and the weights are still good.
+		return loss, m.InitState(len(xs[0])), ErrNonFiniteGrad
+	}
 
 	params := m.Params()
 	for name, g := range grads {
@@ -258,7 +285,12 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 	s := m.InitState(batch)
 	var running float32 = 0.0
 	seen := 0
+	skipped, consecutive := 0, 0
 	lastLog := time.Now()
+
+	// A handful of skipped steps is survivable; a run of them means the
+	// parameters themselves are already NaN and nothing will recover them.
+	const maxConsecutiveSkips = 5
 
 	for step := 1; step <= steps; step++ {
 		xs, ys, wrapped := tb.Next()
@@ -269,15 +301,28 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 		}
 
 		loss, sNext, err := m.FitStep(xs, ys, s, opt, cfg.ClipNorm)
+		s = sNext
+
+		if errors.Is(err, ErrNonFiniteGrad) {
+			skipped++
+			consecutive++
+			fmt.Printf("step %d (epoch %.2f): non-finite gradients, update skipped (%d so far)\n",
+				step, float64(step)/float64(perEpoch), skipped)
+			if consecutive >= maxConsecutiveSkips {
+				return fmt.Errorf("rnn: step %d: %d consecutive non-finite steps; parameters are unrecoverable, lower the learning rate or the clip threshold",
+					step, consecutive)
+			}
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("rnn: step %d: %w", step, err)
 		}
-		s = sNext
+		consecutive = 0
 
 		running += loss
 		seen++
 
-		if logEvery > 0 && step%logEvery == 0 {
+		if logEvery > 0 && step%logEvery == 0 && seen > 0 {
 			// chars/s is the only throughput number comparable across batch
 			// sizes; steps/s is not.
 			cps := float64(seen*batch*cfg.SeqLen) / time.Since(lastLog).Seconds()
