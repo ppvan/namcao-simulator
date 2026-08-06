@@ -1,6 +1,6 @@
 ## Nam Cao Simulator
 
-A **1 million parameter character-level language model** trained from scratch to generate text in the style of **Nam Cao**. The entire training stack was implemented in Go without relying on machine learning frameworks.
+A **1.5 million parameter stylable-level language model** trained from scratch to generate text in the style of **Nam Cao**. The entire training stack was implemented in Go without relying on machine learning frameworks.
 
 ### Highlights
 
