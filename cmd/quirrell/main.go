@@ -244,7 +244,7 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 
 	// ── quick sample after training ───────────────────────────────────────
 	fmt.Println("\n── sample (temperature 0.8) ─────────────────────────────────")
-	sample := generateText(model, vocab, "Tôi ", 300, 0.8, tokenizeOpts, rand.New(rand.NewSource(42)))
+	sample := generateText(model, vocab, "Tôi ", 300, 0, 0.8, tokenizeOpts, rand.New(rand.NewSource(42)))
 	fmt.Println(sample)
 
 	return nil
@@ -269,7 +269,12 @@ func predictCmd() *cli.Command {
 				Name:    "length",
 				Aliases: []string{"n"},
 				Value:   500,
-				Usage:   "number of characters to generate",
+				Usage:   "maximum number of tokens to generate",
+			},
+			&cli.IntFlag{
+				Name:  "sentences",
+				Value: 0,
+				Usage: "stop after this many sentences ('.', '!', '?', '…'); 0 = generate --length tokens",
 			},
 			&cli.Float64Flag{
 				Name:    "temperature",
@@ -336,9 +341,10 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	// ── generate ──────────────────────────────────────────────────────────
 	prompt := cmd.String("prompt")
 	length := int(cmd.Int("length"))
+	sentences := int(cmd.Int("sentences"))
 	temperature := float32(cmd.Float("temperature"))
 
-	output := generateText(model, vocab, prompt, length, temperature, tokenizeOpts, rng)
+	output := generateText(model, vocab, prompt, length, sentences, temperature, tokenizeOpts, rng)
 
 	if cmd.Bool("show-prompt") {
 		fmt.Print(output)
@@ -355,7 +361,7 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length int, temperature float32, opts data.Options, rng *rand.Rand) string {
+func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, maxTokens, sentences int, temperature float32, opts data.Options, rng *rand.Rand) string {
 	// tokenize the prompt the same way the corpus was tokenized for
 	// training, so casing/punctuation rules match what the vocab expects.
 	tokens := data.Tokenize(prompt, opts)
@@ -376,7 +382,29 @@ func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length i
 		fmt.Fprintln(os.Stderr, "quirrell: empty seed after tokenizing – using a random start token")
 	}
 
-	generated := model.Sample(seedIDs, length, temperature, rng)
+	// Specials are structural markers, not prose: force their probability to
+	// zero so generation can never emit <UNK> (or restart the document with
+	// <BOS>/<STORY>) no matter how much weight the model learned to give them.
+	banned := []int{data.PAD_ID, data.UNK_ID, data.BOS_ID, data.EOS_ID, data.STORY_ID}
+
+	// With sentences > 0, stop as soon as that many sentence-final tokens
+	// have been emitted; maxTokens stays as a hard cap so a model that never
+	// produces '.' can't run away.
+	var stop func(id int) bool
+	if sentences > 0 {
+		count := 0
+		stop = func(id int) bool {
+			if id < 0 || id >= len(vocab.IdxToToken) {
+				return false
+			}
+			if _, ok := data.SentenceEnders[vocab.IdxToToken[id]]; ok {
+				count++
+			}
+			return count >= sentences
+		}
+	}
+
+	generated := model.SampleMasked(seedIDs, maxTokens, temperature, banned, stop, rng)
 
 	// decode: seed + generated
 	all := append(append([]int(nil), seedIDs...), generated...)

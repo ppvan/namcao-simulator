@@ -388,6 +388,49 @@ func sampleFromLogits(logits core.Mat, temperature float32, rng *rand.Rand) int 
 	return cols - 1
 }
 
+// SampleMasked is Sample with two generation controls:
+//
+//   - banned ids have their logits forced to -Inf before every draw, so they
+//     can never be emitted — use it to exclude PAD/UNK/BOS/EOS/STORY.
+//   - stop, if non-nil, is consulted after each emitted token; returning true
+//     ends generation early. maxTokens caps the output either way.
+//
+// This is how "generate N sentences" works: ban the specials, and stop once
+// enough sentence-final tokens ('.', '!', '?', '…') have been produced.
+func (m *CharRNN) SampleMasked(seed []int, maxTokens int, temperature float32, banned []int, stop func(id int) bool, rng *rand.Rand) []int {
+	if maxTokens <= 0 {
+		return nil
+	}
+	if rng == nil {
+		rng = rand.New(rand.NewSource(rand.Int63()))
+	}
+	if len(seed) == 0 {
+		seed = []int{rng.Intn(m.vocabSize)}
+	}
+
+	s := m.InitState(1)
+	var logits core.Mat
+	for _, id := range seed {
+		logits, s = m.StepOnce([]int{id}, s)
+	}
+
+	out := make([]int, 0, maxTokens)
+	for i := 0; i < maxTokens; i++ {
+		for _, b := range banned {
+			if b >= 0 && b < logits.Columns {
+				logits.Set(0, b, core.NegInf32())
+			}
+		}
+		next := sampleFromLogits(logits, temperature, rng)
+		out = append(out, next)
+		if stop != nil && stop(next) {
+			break
+		}
+		logits, s = m.StepOnce([]int{next}, s)
+	}
+	return out
+}
+
 func (m *CharRNN) Sample(seed []int, n int, temperature float32, rng *rand.Rand) []int {
 	if n <= 0 {
 		return nil

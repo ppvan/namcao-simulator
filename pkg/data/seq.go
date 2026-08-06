@@ -133,13 +133,33 @@ func Normalize(text string, opts Options) string {
 	return text
 }
 
+// keepPunct is the punctuation emitted as standalone vocabulary tokens
+// instead of being discarded. Sentence enders (. ! ? …) give the model and
+// the sampler explicit sentence boundaries; commas/colons/semicolons give it
+// clause rhythm; dashes cover Nam Cao's dialogue lines ("- Cậu Vàng đi đời
+// rồi, ông giáo ạ!"). Quotes and brackets are still dropped: they come in
+// pairs the model can't reliably balance, so keeping them just produces
+// dangling quote marks in generated text.
+var keepPunct = map[rune]struct{}{
+	'.': {}, ',': {}, '!': {}, '?': {}, ';': {}, ':': {},
+	'…': {}, '—': {}, '–': {}, '-': {},
+}
+
+// SentenceEnders are the tokens that terminate a sentence in generated
+// output. Exported so generation code can count sentences while sampling.
+var SentenceEnders = map[string]struct{}{
+	".": {}, "!": {}, "?": {}, "…": {},
+}
+
 // Tokenize splits text into whitespace-separated word tokens, normalizing
-// (lowercasing) and stripping surrounding punctuation/symbols from each —
-// except for special tokens like <STORY>, which pass through exactly as
-// written so they stay distinct from ordinary vocabulary words.
+// (lowercasing) each — except for special tokens like <STORY>, which pass
+// through exactly as written. Leading/trailing punctuation is split off into
+// standalone tokens (for runes in keepPunct) rather than discarded, so the
+// model can learn — and emit — sentence structure. Interior punctuation
+// (anh-hùng) stays inside its word.
 func Tokenize(text string, opts Options) []string {
 	raw := strings.Fields(text)
-	tokens := make([]string, 0, len(raw))
+	tokens := make([]string, 0, len(raw)*2)
 	for _, word := range raw {
 		if isSpecialToken(word) {
 			tokens = append(tokens, word)
@@ -148,12 +168,60 @@ func Tokenize(text string, opts Options) []string {
 		if opts.Lowercase {
 			word = strings.ToLower(word)
 		}
-		cleaned := strings.TrimFunc(word, func(r rune) bool {
-			return unicode.IsPunct(r) || unicode.IsSymbol(r)
-		})
-		if cleaned != "" {
-			tokens = append(tokens, cleaned)
+		tokens = appendWordTokens(tokens, word)
+	}
+	return tokens
+}
+
+func isPunctOrSym(r rune) bool {
+	return unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+// appendWordTokens splits word into up to three parts — leading punctuation,
+// the core word, trailing punctuation — and appends each as tokens. Edge
+// punctuation in keepPunct becomes its own token; other edge symbols are
+// dropped as before.
+func appendWordTokens(tokens []string, word string) []string {
+	runes := []rune(word)
+	i, j := 0, len(runes)
+	for i < j && isPunctOrSym(runes[i]) {
+		i++
+	}
+	for j > i && isPunctOrSym(runes[j-1]) {
+		j--
+	}
+	tokens = appendPunctTokens(tokens, runes[:i])
+	if i < j {
+		tokens = append(tokens, string(runes[i:j]))
+	}
+	return appendPunctTokens(tokens, runes[j:])
+}
+
+// appendPunctTokens emits one token per keepPunct rune, collapsing any run
+// of two or more '.' into a single '…' token (Nam Cao's "..." is an
+// ellipsis, not three sentence breaks).
+func appendPunctTokens(tokens []string, runes []rune) []string {
+	dots := 0
+	for _, r := range runes {
+		if r == '.' {
+			dots++
+			continue
 		}
+		tokens = flushDots(tokens, dots)
+		dots = 0
+		if _, ok := keepPunct[r]; ok {
+			tokens = append(tokens, string(r))
+		}
+	}
+	return flushDots(tokens, dots)
+}
+
+func flushDots(tokens []string, dots int) []string {
+	switch {
+	case dots == 1:
+		return append(tokens, ".")
+	case dots >= 2:
+		return append(tokens, "…")
 	}
 	return tokens
 }
@@ -235,20 +303,28 @@ func (v *Vocab) Encode(text string, opts Options) []int {
 // output (rather than stripped like the other special tokens) since it's a
 // meaningful boundary marker for generated multi-story text, not just
 // sequence padding.
+// noSpaceBefore lists tokens that attach to the preceding word ("rồi," not
+// "rồi ,") when decoding.
+var noSpaceBefore = map[string]struct{}{
+	".": {}, ",": {}, "!": {}, "?": {}, ";": {}, ":": {}, "…": {},
+}
+
 func (v *Vocab) Decode(ids []int) string {
-	tokens := make([]string, 0, len(ids))
+	var sb strings.Builder
 	for _, id := range ids {
-		if id < 0 || id >= len(v.IdxToToken) {
-			tokens = append(tokens, UNK)
-			continue
+		tok := UNK
+		if id >= 0 && id < len(v.IdxToToken) {
+			tok = v.IdxToToken[id]
 		}
-		tok := v.IdxToToken[id]
 		if tok == PAD || tok == BOS || tok == EOS {
 			continue
 		}
-		tokens = append(tokens, tok)
+		if _, tight := noSpaceBefore[tok]; !tight && sb.Len() > 0 {
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(tok)
 	}
-	return strings.Join(tokens, " ")
+	return sb.String()
 }
 
 func SplitData(ids []int, trainRatio float32) (train, val []int) {
