@@ -133,16 +133,21 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	}
 	modelPath := cmd.Args().First()
 
+	// tokenizeOpts is the single source of truth for how text gets
+	// tokenized in this run. It's saved into the checkpoint below so
+	// `predict` can reproduce it exactly rather than hardcoding its own copy.
+	tokenizeOpts := data.DefaultOptions
+
 	// ── load corpus ───────────────────────────────────────────────────────
 	dataPath := cmd.String("data")
 	fmt.Printf("quirrell: loading corpus from %q\n", dataPath)
-	text, err := data.LoadText(dataPath)
+	text, err := data.LoadCorpus(dataPath)
 	if err != nil {
 		return fmt.Errorf("load corpus: %w", err)
 	}
 
-	vocab := data.BuildVocab(text)
-	ids := data.Encode(text, vocab)
+	vocab := data.BuildVocab(text, tokenizeOpts)
+	ids := vocab.Encode(text, tokenizeOpts)
 	trainRatio := float32(cmd.Float("train-ratio"))
 	train, val := data.SplitData(ids, trainRatio)
 
@@ -224,7 +229,7 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		float64(totalChars)/elapsed.Seconds())
 
 	// ── save checkpoint ───────────────────────────────────────────────────
-	saveOpts := rnn.SaveOptions{Vocab: vocab}
+	saveOpts := rnn.SaveOptions{Vocab: vocab, TokenizeOptions: tokenizeOpts}
 	if !cmd.Bool("no-optimizer-state") {
 		saveOpts.Optimizer = opt
 	}
@@ -239,7 +244,7 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 
 	// ── quick sample after training ───────────────────────────────────────
 	fmt.Println("\n── sample (temperature 0.8) ─────────────────────────────────")
-	sample := generateText(model, vocab, "The ", 300, 0.8, rand.New(rand.NewSource(42)))
+	sample := generateText(model, vocab, "Tôi ", 300, 0.8, tokenizeOpts, rand.New(rand.NewSource(42)))
 	fmt.Println(sample)
 
 	return nil
@@ -307,6 +312,10 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 
 	model := res.Model
 	vocab := res.Vocab
+	// tokenizeOpts came from training (saved into the checkpoint), so the
+	// prompt below gets tokenized exactly the way the corpus was — no
+	// separate flag or hardcoded default to keep in sync by hand.
+	tokenizeOpts := res.TokenizeOptions
 	totalParams := 0
 	for _, p := range model.Params() {
 		totalParams += p.Rows * p.Columns
@@ -329,7 +338,7 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	length := int(cmd.Int("length"))
 	temperature := float32(cmd.Float("temperature"))
 
-	output := generateText(model, vocab, prompt, length, temperature, rng)
+	output := generateText(model, vocab, prompt, length, temperature, tokenizeOpts, rng)
 
 	if cmd.Bool("show-prompt") {
 		fmt.Print(output)
@@ -345,17 +354,18 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 
 	return nil
 }
-func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length int, temperature float32, rng *rand.Rand) string {
-	// encode prompt – skip any character not in vocab with a warning.
-	// range over prompt yields one rune at a time (decoding UTF-8 as it
-	// goes), so multi-byte Vietnamese characters are looked up whole
-	// instead of being split into individual bytes.
-	var seedIDs []int
-	for _, r := range prompt {
-		id, ok := vocab.CharToIdx[r]
+
+func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length int, temperature float32, opts data.Options, rng *rand.Rand) string {
+	// tokenize the prompt the same way the corpus was tokenized for
+	// training, so casing/punctuation rules match what the vocab expects.
+	tokens := data.Tokenize(prompt, opts)
+
+	seedIDs := make([]int, 0, len(tokens))
+	for _, tok := range tokens {
+		id, ok := vocab.TokenToIdx[tok]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "quirrell: warning: character %q not in vocabulary, skipping\n", r)
-			continue
+			fmt.Fprintf(os.Stderr, "quirrell: warning: token %q not in vocabulary, using <UNK>\n", tok)
+			id = data.UNK_ID
 		}
 		seedIDs = append(seedIDs, id)
 	}
@@ -363,12 +373,12 @@ func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, length i
 	if len(seedIDs) == 0 {
 		// pick a random start token
 		seedIDs = []int{rng.Intn(vocab.VocabSize())}
-		fmt.Fprintln(os.Stderr, "quirrell: empty seed after filtering – using a random start token")
+		fmt.Fprintln(os.Stderr, "quirrell: empty seed after tokenizing – using a random start token")
 	}
 
 	generated := model.Sample(seedIDs, length, temperature, rng)
 
 	// decode: seed + generated
 	all := append(append([]int(nil), seedIDs...), generated...)
-	return data.Decode(all, vocab)
+	return vocab.Decode(all)
 }

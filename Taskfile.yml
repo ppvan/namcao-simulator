@@ -6,9 +6,6 @@ vars:
   BINS:
     - logic_gates
     - ndigits
-    - shakespeare
-    - shakespeare-lstm
-    - profile
     - quirrell
     # - prime
 

@@ -18,9 +18,10 @@
 //	{
 //	  "arch": { "vocab_size": int, "embed_size": int, "hidden_size": int },
 //	  "vocab": {
-//	    "char_to_idx": { "<char>": int, … },
-//	    "idx_to_char": [ int, … ]   // Unicode code points as ints
+//	    "token_to_idx": { "<token>": int, … },
+//	    "idx_to_token": [ "<token>", … ]
 //	  },
+//	  "options": { "lowercase": bool, "min_freq": int },
 //	  "tensors": {
 //	    "<param_name>": { "rows": int, "cols": int, "offset": int, "len": int }
 //	  },
@@ -31,6 +32,9 @@
 // ─────────
 //  • One file, no side-cars. The vocab is embedded in the JSON header so
 //    the checkpoint is fully self-contained: load it anywhere and generate.
+//  • The tokenization Options (lowercase, min-freq) used to build the vocab
+//    are embedded too, so a prompt at inference time gets tokenized exactly
+//    the way training text was – no guessing or manual flag-matching.
 //  • Human-readable header; hexdump the first ~2 KB and you see the full
 //    architecture, vocabulary, and tensor inventory.
 //  • The tensor blob is a single contiguous []float32 written with
@@ -83,19 +87,26 @@ type adamState struct {
 }
 
 // ckptVocab is the wire representation of data.Vocab embedded in the header.
-// Using []int for IdxToChar avoids ambiguity over encoding: each entry is a
-// Unicode code point (rune), stored as a plain int rather than raw bytes, so
-// multi-byte characters (e.g. Vietnamese diacritics) round-trip exactly.
-// CharToIdx keys are ordinary JSON strings holding exactly one rune each –
-// JSON is UTF-8 natively, so this needs no special handling for non-ASCII.
+// Tokens are ordinary JSON strings – JSON is UTF-8 natively, so multi-word
+// or multi-byte tokens (e.g. Vietnamese words with diacritics) round-trip
+// exactly without any special encoding.
 type ckptVocab struct {
-	CharToIdx map[string]int `json:"char_to_idx"`
-	IdxToChar []int          `json:"idx_to_char"`
+	TokenToIdx map[string]int `json:"token_to_idx"`
+	IdxToToken []string       `json:"idx_to_token"`
+}
+
+// ckptOptions is the wire representation of data.Options embedded in the
+// header, so a prompt can be tokenized identically to the training corpus
+// at inference time without the caller having to know or re-specify them.
+type ckptOptions struct {
+	Lowercase bool `json:"lowercase"`
+	MinFreq   int  `json:"min_freq"`
 }
 
 type ckptHeader struct {
 	Arch    ckptArch               `json:"arch"`
 	Vocab   *ckptVocab             `json:"vocab,omitempty"`
+	Options *ckptOptions           `json:"options,omitempty"`
 	Tensors map[string]tensorEntry `json:"tensors"`
 	Adam    *adamState             `json:"adam,omitempty"`
 }
@@ -108,6 +119,11 @@ type SaveOptions struct {
 	// fully self-contained and can be used for inference without the original
 	// text corpus.
 	Vocab *data.Vocab
+
+	// TokenizeOptions is embedded alongside Vocab so a prompt at inference
+	// time can be tokenized (lowercased, etc.) exactly the way the training
+	// corpus was. Only meaningful when Vocab is also set.
+	TokenizeOptions data.Options
 
 	// Optimizer, if non-nil and pointing to a *core.Adam, causes the Adam
 	// moment buffers and step counters to be written alongside the weights
@@ -137,6 +153,10 @@ type LoadResult struct {
 	// Vocab is non-nil when the checkpoint was saved with a Vocab.
 	// It is needed for inference (encoding prompts and decoding output).
 	Vocab *data.Vocab
+	// TokenizeOptions is populated whenever Vocab is, and should be passed
+	// to data.Tokenize/Vocab.Encode when processing a prompt so it matches
+	// how the training corpus was tokenized.
+	TokenizeOptions data.Options
 	// Adam is non-nil only when the checkpoint contained optimizer state.
 	Adam *core.Adam
 }
@@ -198,20 +218,16 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 
 	// ── 3. encode header JSON ────────────────────────────────────────────
 	var hdrVocab *ckptVocab
+	var hdrOptions *ckptOptions
 	if opts.Vocab != nil {
-		cv := &ckptVocab{
-			CharToIdx: make(map[string]int, len(opts.Vocab.CharToIdx)),
-			IdxToChar: make([]int, len(opts.Vocab.IdxToChar)),
+		hdrVocab = &ckptVocab{
+			TokenToIdx: opts.Vocab.TokenToIdx,
+			IdxToToken: opts.Vocab.IdxToToken,
 		}
-		for r, idx := range opts.Vocab.CharToIdx {
-			// string(rune) correctly UTF-8 encodes any code point, so this
-			// works unchanged for ASCII and multi-byte Vietnamese characters.
-			cv.CharToIdx[string(r)] = idx
+		hdrOptions = &ckptOptions{
+			Lowercase: opts.TokenizeOptions.Lowercase,
+			MinFreq:   opts.TokenizeOptions.MinFreq,
 		}
-		for i, r := range opts.Vocab.IdxToChar {
-			cv.IdxToChar[i] = int(r)
-		}
-		hdrVocab = cv
 	}
 
 	hdr := ckptHeader{
@@ -221,6 +237,7 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 			HiddenSize: m.HiddenSize(),
 		},
 		Vocab:   hdrVocab,
+		Options: hdrOptions,
 		Tensors: tensors,
 		Adam:    hdrAdam,
 	}
@@ -347,26 +364,29 @@ func read(r io.Reader) (LoadResult, error) {
 		restoredAdam = adam
 	}
 
-	// ── restore vocab (optional) ─────────────────────────────────────────
+	// ── restore vocab + tokenize options (optional) ──────────────────────
 	var restoredVocab *data.Vocab
+	var restoredOptions data.Options
 	if hdr.Vocab != nil {
 		cv := hdr.Vocab
-		charToIdx := make(map[rune]int, len(cv.CharToIdx))
-		for s, idx := range cv.CharToIdx {
-			rs := []rune(s)
-			if len(rs) != 1 {
-				return LoadResult{}, fmt.Errorf("checkpoint load: vocab key %q is not a single rune", s)
-			}
-			charToIdx[rs[0]] = idx
+		restoredVocab = &data.Vocab{
+			TokenToIdx: cv.TokenToIdx,
+			IdxToToken: cv.IdxToToken,
 		}
-		idxToChar := make([]rune, len(cv.IdxToChar))
-		for i, v := range cv.IdxToChar {
-			idxToChar[i] = rune(v)
+	}
+	if hdr.Options != nil {
+		restoredOptions = data.Options{
+			Lowercase: hdr.Options.Lowercase,
+			MinFreq:   hdr.Options.MinFreq,
 		}
-		restoredVocab = &data.Vocab{CharToIdx: charToIdx, IdxToChar: idxToChar}
 	}
 
-	return LoadResult{Model: model, Vocab: restoredVocab, Adam: restoredAdam}, nil
+	return LoadResult{
+		Model:           model,
+		Vocab:           restoredVocab,
+		TokenizeOptions: restoredOptions,
+		Adam:            restoredAdam,
+	}, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

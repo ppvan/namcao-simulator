@@ -2,15 +2,70 @@ package data
 
 import (
 	"fmt"
+	"io"
 	"os"
-	"slices"
+	"path/filepath"
+	"sort"
+	"strings"
+	"unicode"
 )
 
-type Vocab struct {
-	CharToIdx map[rune]int
-	IdxToChar []rune
+// Special tokens, mirroring txt.Corpus's reserved ids so both packages agree
+// on layout if you ever share a vocab format between them. STORY marks the
+// start of a new document (one per file loaded via LoadCorpus) so the model
+// can learn story boundaries instead of seeing one endless stream of text.
+const (
+	PAD   = "<PAD>"
+	UNK   = "<UNK>"
+	BOS   = "<BOS>"
+	EOS   = "<EOS>"
+	STORY = "<STORY>"
+
+	PAD_ID   = 0
+	UNK_ID   = 2
+	BOS_ID   = 1
+	EOS_ID   = 3
+	STORY_ID = 4
+)
+
+// specialTokens are literal markers that pass through tokenization untouched
+// — never lowercased, never punctuation-trimmed, never counted as ordinary
+// vocabulary words subject to MinFreq pruning.
+var specialTokens = map[string]struct{}{
+	PAD:   {},
+	UNK:   {},
+	BOS:   {},
+	EOS:   {},
+	STORY: {},
 }
 
+func isSpecialToken(s string) bool {
+	_, ok := specialTokens[s]
+	return ok
+}
+
+// Options controls text normalization and vocab pruning for word tokenization.
+type Options struct {
+	Lowercase bool
+	// MinFreq drops tokens occurring fewer than MinFreq times from the
+	// vocabulary; they fall back to UNK at encode time.
+	MinFreq int
+}
+
+// DefaultOptions is a reasonable starting point: lowercase everything, and
+// drop hapax legomena into UNK (same MinFreq txt.Corpus.BuildVocab uses).
+var DefaultOptions = Options{Lowercase: true, MinFreq: 2}
+
+type Vocab struct {
+	TokenToIdx map[string]int
+	IdxToToken []string
+}
+
+func (v *Vocab) VocabSize() int {
+	return len(v.IdxToToken)
+}
+
+// LoadText reads a single file's contents.
 func LoadText(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -19,58 +74,181 @@ func LoadText(path string) (string, error) {
 	return string(b), nil
 }
 
-func BuildVocab(text string) *Vocab {
-	seen := make(map[rune]struct{})
-	for _, r := range text {
-		seen[r] = struct{}{}
-	}
-
-	chars := make([]rune, 0, len(seen))
-	for c := range seen {
-		chars = append(chars, c)
-	}
-	slices.Sort(chars)
-
-	charToIdx := make(map[rune]int, len(chars))
-	for i, c := range chars {
-		charToIdx[c] = i
-	}
-
-	return &Vocab{CharToIdx: charToIdx, IdxToChar: chars}
-}
-
-func (v *Vocab) VocabSize() int {
-	return len(v.IdxToChar)
-}
-
-// Encode converts text into a slice of vocabulary ids, one per rune (not per
-// byte), so a multi-byte UTF-8 character like "ệ" becomes a single id.
-func (v *Vocab) Encode(text string) ([]int, error) {
-	ids := make([]int, 0, len(text))
-	for i, r := range text {
-		id, ok := v.CharToIdx[r]
-		if !ok {
-			return nil, fmt.Errorf("data: rune %q at byte offset %d is not in the vocabulary", r, i)
+// LoadCorpus walks dir recursively and concatenates every .txt file it finds
+// (separated by a blank line), the same file discovery txt.LoadCorpus uses.
+// Each file is treated as one story: its content is prefixed with the
+// STORY marker so the tokenized stream carries explicit document
+// boundaries. It returns one big string rather than per-sentence records
+// since this package trains on a flat token stream, not sentence pairs.
+func LoadCorpus(dir string) (string, error) {
+	var sb strings.Builder
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("walk %q: %w", path, err)
 		}
-		ids = append(ids, id)
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".txt") {
+			return nil
+		}
+
+		content, err := loadFile(path)
+		if err != nil {
+			return fmt.Errorf("load %q: %w", path, err)
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(STORY)
+		sb.WriteString("\n\n")
+		sb.WriteString(content)
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
-	return ids, nil
+	return sb.String(), nil
 }
 
-func Encode(text string, v *Vocab) []int {
-	ids := make([]int, 0, len(text))
-	for _, r := range text {
-		ids = append(ids, v.CharToIdx[r])
+func loadFile(path string) (string, error) {
+	handle, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
+	defer handle.Close()
+
+	b, err := io.ReadAll(handle)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// Normalize applies the options' text normalization (currently just
+// lowercasing) to a standalone string. Tokenize does this per-token instead
+// so it can skip special tokens like <STORY>, but Normalize is kept as a
+// standalone helper for anywhere else you want the same rule applied.
+func Normalize(text string, opts Options) string {
+	if opts.Lowercase {
+		text = strings.ToLower(text)
+	}
+	return text
+}
+
+// Tokenize splits text into whitespace-separated word tokens, normalizing
+// (lowercasing) and stripping surrounding punctuation/symbols from each —
+// except for special tokens like <STORY>, which pass through exactly as
+// written so they stay distinct from ordinary vocabulary words.
+func Tokenize(text string, opts Options) []string {
+	raw := strings.Fields(text)
+	tokens := make([]string, 0, len(raw))
+	for _, word := range raw {
+		if isSpecialToken(word) {
+			tokens = append(tokens, word)
+			continue
+		}
+		if opts.Lowercase {
+			word = strings.ToLower(word)
+		}
+		cleaned := strings.TrimFunc(word, func(r rune) bool {
+			return unicode.IsPunct(r) || unicode.IsSymbol(r)
+		})
+		if cleaned != "" {
+			tokens = append(tokens, cleaned)
+		}
+	}
+	return tokens
+}
+
+// BuildVocab tokenizes text per opts and builds a Vocab, reserving
+// PAD/UNK/BOS/EOS/STORY at ids 0-4 the same way txt.Corpus.BuildVocab
+// reserves its special tokens. Tokens occurring fewer than opts.MinFreq
+// times are excluded from the vocab and fall back to UNK at encode time.
+func BuildVocab(text string, opts Options) *Vocab {
+	if opts.MinFreq < 1 {
+		opts.MinFreq = 1
+	}
+
+	tokens := Tokenize(text, opts)
+
+	freq := make(map[string]int, len(tokens))
+	for _, t := range tokens {
+		if isSpecialToken(t) {
+			// Already reserved below; don't let it compete for a second id
+			// or get pruned by MinFreq like an ordinary word.
+			continue
+		}
+		freq[t]++
+	}
+
+	qualified := make([]string, 0, len(freq))
+	for t, count := range freq {
+		if count >= opts.MinFreq {
+			qualified = append(qualified, t)
+		}
+	}
+	sort.Strings(qualified)
+
+	tokenToIdx := map[string]int{
+		PAD:   PAD_ID,
+		UNK:   UNK_ID,
+		BOS:   BOS_ID,
+		EOS:   EOS_ID,
+		STORY: STORY_ID,
+	}
+	idxToToken := make([]string, 5, len(qualified)+5)
+	idxToToken[PAD_ID] = PAD
+	idxToToken[UNK_ID] = UNK
+	idxToToken[BOS_ID] = BOS
+	idxToToken[EOS_ID] = EOS
+	idxToToken[STORY_ID] = STORY
+
+	nextID := 5
+	for _, t := range qualified {
+		tokenToIdx[t] = nextID
+		idxToToken = append(idxToToken, t)
+		nextID++
+	}
+
+	return &Vocab{TokenToIdx: tokenToIdx, IdxToToken: idxToToken}
+}
+
+// Encode tokenizes text per opts and converts it to vocabulary ids, wrapped
+// in BOS/EOS. Tokens absent from the vocab (below MinFreq, or unseen at
+// train time) map to UNK instead of erroring, so encoding never fails on
+// new input.
+func (v *Vocab) Encode(text string, opts Options) []int {
+	tokens := Tokenize(text, opts)
+	ids := make([]int, 0, len(tokens)+2)
+	ids = append(ids, BOS_ID)
+	for _, t := range tokens {
+		if id, ok := v.TokenToIdx[t]; ok {
+			ids = append(ids, id)
+		} else {
+			ids = append(ids, UNK_ID)
+		}
+	}
+	ids = append(ids, EOS_ID)
 	return ids
 }
 
-func Decode(ids []int, v *Vocab) string {
-	rs := make([]rune, len(ids))
-	for i, id := range ids {
-		rs[i] = v.IdxToChar[id]
+// Decode converts ids back into text, dropping PAD/BOS/EOS markers and
+// joining the remaining word tokens with spaces. STORY is kept in the
+// output (rather than stripped like the other special tokens) since it's a
+// meaningful boundary marker for generated multi-story text, not just
+// sequence padding.
+func (v *Vocab) Decode(ids []int) string {
+	tokens := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id < 0 || id >= len(v.IdxToToken) {
+			tokens = append(tokens, UNK)
+			continue
+		}
+		tok := v.IdxToToken[id]
+		if tok == PAD || tok == BOS || tok == EOS {
+			continue
+		}
+		tokens = append(tokens, tok)
 	}
-	return string(rs)
+	return strings.Join(tokens, " ")
 }
 
 func SplitData(ids []int, trainRatio float32) (train, val []int) {
