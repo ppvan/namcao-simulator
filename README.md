@@ -13,4 +13,9 @@ A **1 million parameter character-level language model** trained from scratch to
 
 ### Preview
 
-<img width="2078" height="283" alt="Nam Cao Simulator output" src="https://github.com/user-attachments/assets/0b35ef0b-1c4f-4810-8c99-a35df0990079" />
+
+
+
+https://github.com/user-attachments/assets/b91153b0-5b30-4111-8b79-01c76ba097b2
+
+
