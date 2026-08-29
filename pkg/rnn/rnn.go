@@ -2,7 +2,6 @@ package rnn
 
 import "github.com/ppvan/gpt/pkg/core"
 
-// RNN "cell" to abstract RNN, LSTM and GRU
 type Cell interface {
 	core.Parameter
 	InitState(batch int) State

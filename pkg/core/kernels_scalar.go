@@ -1,10 +1,5 @@
 package core
 
-// Scalar reference kernels. These are always compiled and are what the
-// SIMD entry points fall back to when the build lacks GOEXPERIMENT=simd,
-// the GOARCH is not amd64, or the CPU lacks AVX2/FMA. They are also the
-// oracle the kernel tests compare against.
-
 func dotTIntoScalar(a, b, c []float32, m, n, q int) {
 	for i := 0; i < m; i++ {
 		arow := a[i*n : i*n+n]

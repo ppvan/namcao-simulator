@@ -11,16 +11,12 @@ import (
 	"github.com/ppvan/gpt/pkg/data"
 )
 
-// writeTargets fills dst, a (batch, 1) class-index column, from one timestep's
-// targets. CrossEntropy takes targets in this shape.
 func writeTargets(dst core.Mat, ids []int) {
 	for i, id := range ids {
 		dst.Set(i, 0, float32(id))
 	}
 }
 
-// checkSeq validates the shapes shared by the loss entry points and returns the
-// sequence length and batch size.
 func checkSeq(logits []core.Mat, ys [][]int) (T, batch int, err error) {
 	T = len(logits)
 	if T == 0 {
@@ -72,7 +68,6 @@ func LossAndGrad(logits []core.Mat, ys [][]int) (loss float32, dLogits []core.Ma
 	return total * scale, dLogits, nil
 }
 
-// SeqLoss is the forward-only half of LossAndGrad, for evaluation.
 func SeqLoss(logits []core.Mat, ys [][]int) (float32, error) {
 	T, batch, err := checkSeq(logits, ys)
 	if err != nil {
@@ -95,22 +90,8 @@ func SeqLoss(logits []core.Mat, ys [][]int) (float32, error) {
 	return total / float32(T), nil
 }
 
-// ErrNonFiniteGrad reports a step whose gradients contained NaN or Inf. The
-// update is skipped rather than applied: a single non-finite entry poisons
-// every parameter it touches, and Adam's moment buffers then keep it alive
-// forever, so the run never recovers.
 var ErrNonFiniteGrad = errors.New("rnn: non-finite gradients, update skipped")
 
-// ClipGrads rescales grads in place so their global L2 norm is at most
-// maxNorm, and reports whether they were finite.
-//
-// The norm is accumulated in float64 deliberately. With a float32 accumulator
-// a single gradient element above ~1.8e19 overflows the sum of squares to
-// +Inf, FastSqrt32(+Inf) returns -Inf, and -Inf <= maxNorm reads as "small
-// enough, no clipping needed" -- so clipping switched itself off at exactly
-// the moment it was needed. float64 has the headroom to hold the norm of any
-// float32 matrix, and math.Sqrt is exact; this runs once per step over the
-// whole parameter set, so its cost is noise next to the matmuls.
 func ClipGrads(grads core.Grads, maxNorm float32) (core.Grads, bool) {
 	var sumSq float64
 	for _, g := range grads {
@@ -136,8 +117,6 @@ func ClipGrads(grads core.Grads, maxNorm float32) (core.Grads, bool) {
 	return grads, true
 }
 
-// FitStep runs one forward/backward/update over a time-major minibatch:
-// xs[t] and ys[t] each hold one id per stream, so xs is (seqLen, batch).
 func (m *CharRNN) FitStep(xs, ys [][]int, s0 State, opt core.Optimizer, clipNorm float32) (loss float32, sFinal State, err error) {
 	logits, s, cache := m.ForwardSeq(xs, s0)
 
@@ -165,9 +144,6 @@ func (m *CharRNN) FitStep(xs, ys [][]int, s0 State, opt core.Optimizer, clipNorm
 	return loss, s, nil
 }
 
-// EvalLoss averages the validation loss over up to maxWindows minibatches.
-// If the split is too small to feed the requested batch size the batch is
-// halved until it fits, so a large training batch never breaks evaluation.
 func (m *CharRNN) EvalLoss(ids []int, batch, seqLen, maxWindows int) (float32, error) {
 	if batch <= 0 {
 		batch = 1
@@ -235,8 +211,6 @@ type TrainConfig struct {
 	EvalWindows int
 }
 
-// epochsToSteps turns an epoch-relative interval into a step count. Zero takes
-// def; negative disables and returns 0.
 func epochsToSteps(every, def float64, perEpoch int) int {
 	if every < 0 {
 		return 0
@@ -388,15 +362,6 @@ func sampleFromLogits(logits core.Mat, temperature float32, rng *rand.Rand) int 
 	return cols - 1
 }
 
-// SampleMasked is Sample with two generation controls:
-//
-//   - banned ids have their logits forced to -Inf before every draw, so they
-//     can never be emitted — use it to exclude PAD/UNK/BOS/EOS/STORY.
-//   - stop, if non-nil, is consulted after each emitted token; returning true
-//     ends generation early. maxTokens caps the output either way.
-//
-// This is how "generate N sentences" works: ban the specials, and stop once
-// enough sentence-final tokens ('.', '!', '?', '…') have been produced.
 func (m *CharRNN) SampleMasked(seed []int, maxTokens int, temperature float32, banned []int, stop func(id int) bool, rng *rand.Rand) []int {
 	if maxTokens <= 0 {
 		return nil

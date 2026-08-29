@@ -96,8 +96,6 @@ func hsum8(v archsimd.Float32x8, lanes *[simdLanes]float32) float32 {
 		((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]))
 }
 
-//
-
 func tDotAccInto(a, b, c []float32, m, n, p int) {
 	if !simdOK {
 		tDotAccIntoScalar(a, b, c, m, n, p)
@@ -162,8 +160,6 @@ func tDotAccInto(a, b, c []float32, m, n, p int) {
 		}
 	}
 }
-
-//
 
 func dotTiled(a, b, result []float32, rowStart, rowEnd, n, p, colStart, colEnd int) {
 	if !simdOK {

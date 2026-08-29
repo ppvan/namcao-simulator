@@ -2,10 +2,6 @@ package rnn
 
 import "github.com/ppvan/gpt/pkg/core"
 
-// The embedding layer can be thought of as a linear layer where
-// the input has shape (seqLen × vocabSize). Since each input row
-// is one-hot encoded, the matrix multiplication collapses into a
-// simple row lookup, making the implementation much simpler and faster.
 type Embedding struct {
 	Weights core.Mat
 }

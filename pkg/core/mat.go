@@ -168,13 +168,11 @@ func (mat Mat) TDot(other Mat) Mat {
 	return result
 }
 
-// TDotAccInto computes dst += A^T . B in place.
 func (mat Mat) TDotAccInto(other, dst Mat) Mat {
 	tDotAccInto(mat.weights, other.weights, dst.weights, mat.Rows, mat.Columns, other.Columns)
 	return dst
 }
 
-// SumRowsInto accumulates the column sums of mat into dst (1,C).
 func (mat Mat) SumRowsInto(dst Mat) Mat {
 	cols := mat.Columns
 	for i := 0; i < mat.Rows; i++ {
@@ -422,10 +420,6 @@ func (mat Mat) ScaleInPlace(s float32) Mat {
 	return mat
 }
 
-// SumSquares64 returns the sum of squared elements accumulated in float64.
-// A float32 accumulator overflows to +Inf once any single element exceeds
-// ~1.8e19, which silently destroys gradient-norm clipping; float64 has the
-// headroom to represent the norm of anything a float32 matrix can hold.
 func (mat Mat) SumSquares64() float64 {
 	var sum float64
 	for _, v := range mat.weights {
@@ -435,7 +429,6 @@ func (mat Mat) SumSquares64() float64 {
 	return sum
 }
 
-// SumSquares returns the sum of squared elements [performance]
 func (mat Mat) SumSquares() float32 {
 	var s0, s1 float32
 	w := mat.weights
@@ -450,7 +443,6 @@ func (mat Mat) SumSquares() float32 {
 	return s0 + s1
 }
 
-// AdamStep applies one fused Adam update to param in place[performance].
 func AdamStep(param, grad, m, v Mat, rate, b1, b2, eps, corr1, corr2 float32) {
 	p, g, mw, vw := param.weights, grad.weights, m.weights, v.weights
 	ob1, ob2 := 1-b1, 1-b2

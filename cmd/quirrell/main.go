@@ -1,15 +1,3 @@
-// quirrell – a character-level LSTM trainer and text generator.
-//
-// Usage:
-//
-//	quirrell train  <model.bin>  [flags]   Train on a text file and save.
-//	quirrell predict <model.bin> [flags]   Load a checkpoint and generate text.
-//
-// Examples:
-//
-//	quirrell train model.bin --data dataset/tinyshakespeare/shakespeare.txt
-//	quirrell train model.bin --data corpus.txt --steps 50000 --hidden 512
-//	quirrell predict model.bin --prompt "To be or not" --length 400 --temperature 0.8
 package main
 
 import (
@@ -43,8 +31,6 @@ func main() {
 		log.Fatal(err)
 	}
 }
-
-// ── train ─────────────────────────────────────────────────────────────────────
 
 func trainCmd() *cli.Command {
 	return &cli.Command{
@@ -249,8 +235,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 
 	return nil
 }
-
-// ── predict ───────────────────────────────────────────────────────────────────
 
 func predictCmd() *cli.Command {
 	return &cli.Command{

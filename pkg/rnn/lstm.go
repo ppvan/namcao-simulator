@@ -4,13 +4,6 @@ import (
 	"github.com/ppvan/gpt/pkg/core"
 )
 
-// LSTMCell with fused gates: instead of 4 separate weight matrices per
-// input, the gates live side by side in single matrices, in the column
-// order f | i | o | g:
-//
-//	W (inputSize, 4h), U (hiddenSize, 4h), B (1, 4h)
-//
-// [performance]
 type LSTMCell struct {
 	W core.Mat // input weights,  (inputSize, 4*hiddenSize)
 	U core.Mat // hidden weights, (hiddenSize, 4*hiddenSize)
@@ -116,8 +109,6 @@ func (c *LSTMCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPr
 	return dx, State{dhPrev, dcPrev}, grads
 }
 
-// BackwardStepInto is the hot training path: weight gradients are accumulated
-// into caller-owned buffers (acc) rather than being returned as fresh matrices.
 func (c *LSTMCell) BackwardStepInto(cache core.Cache, dNext State, acc core.Grads) (dx core.Mat, dPrev State) {
 	cc := cache.(lstmCellCache)
 	dh, dcNext := dNext[0], dNext[1]

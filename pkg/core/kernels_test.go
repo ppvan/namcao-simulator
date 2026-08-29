@@ -77,7 +77,6 @@ func maxrel(x, y []float32) float64 {
 	return w
 }
 
-// shapes: real LSTM ones plus adversarial sizes for the tail paths
 var shapesA = [][3]int{
 	{1, 1024, 256}, {1, 1024, 32}, {1, 256, 65}, {1, 32, 1024}, // real
 	{1, 1, 1}, {1, 7, 3}, {2, 9, 5}, {3, 8, 8}, {4, 17, 13}, {5, 1, 1},
@@ -122,7 +121,6 @@ func TestTDotAccIntoMatchesScalar(t *testing.T) {
 	}
 }
 
-// exercises the column-window path used by the parallel splitter
 func TestDotTiledMatchesScalar(t *testing.T) {
 	r := rand.New(rand.NewSource(3))
 	for _, s := range [][3]int{{1, 32, 1024}, {1, 256, 1024}, {1, 256, 65}, {8, 64, 64}, {3, 7, 13}, {5, 9, 17}, {1, 1, 1}, {40, 33, 71}} {
@@ -155,7 +153,6 @@ func TestDotTiledMatchesScalar(t *testing.T) {
 	}
 }
 
-// t=0 has hPrev == 0; the blocked path must not skip it incorrectly
 func TestZeroRows(t *testing.T) {
 	r := rand.New(rand.NewSource(4))
 	for _, m := range []int{1, 4, 7, 64} {
@@ -172,7 +169,6 @@ func TestZeroRows(t *testing.T) {
 	}
 }
 
-// no write may land outside the destination window
 func TestNoOverrun(t *testing.T) {
 	r := rand.New(rand.NewSource(5))
 	const guard = 16

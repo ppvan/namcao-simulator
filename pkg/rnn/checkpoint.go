@@ -1,47 +1,3 @@
-// Package rnn – checkpoint.go
-//
-// Binary checkpoint format (project-specific, not an open standard).
-//
-// Layout
-// ──────
-//
-//	Offset  Size  Field
-//	     0     8  Magic bytes  "GPTCKPT\x00"
-//	     8     4  Format version (uint32 LE) – currently 1
-//	    12     4  Header length H (uint32 LE)
-//	    16     H  Header JSON (UTF-8)
-//	  16+H     *  Tensor blob – packed float32 values (little-endian)
-//
-// Header JSON schema
-// ──────────────────
-//
-//	{
-//	  "arch": { "vocab_size": int, "embed_size": int, "hidden_size": int },
-//	  "vocab": {
-//	    "token_to_idx": { "<token>": int, … },
-//	    "idx_to_token": [ "<token>", … ]
-//	  },
-//	  "options": { "lowercase": bool, "min_freq": int },
-//	  "tensors": {
-//	    "<param_name>": { "rows": int, "cols": int, "offset": int, "len": int }
-//	  },
-//	  "adam": { "m": {…}, "v": {…}, "t": {…} }   // optional
-//	}
-//
-// Rationale
-// ─────────
-//  • One file, no side-cars. The vocab is embedded in the JSON header so
-//    the checkpoint is fully self-contained: load it anywhere and generate.
-//  • The tokenization Options (lowercase, min-freq) used to build the vocab
-//    are embedded too, so a prompt at inference time gets tokenized exactly
-//    the way training text was – no guessing or manual flag-matching.
-//  • Human-readable header; hexdump the first ~2 KB and you see the full
-//    architecture, vocabulary, and tensor inventory.
-//  • The tensor blob is a single contiguous []float32 written with
-//    encoding/binary – no reflection, no unsafe, no cgo.
-//  • Adam state is optional: omit for a weights-only checkpoint,
-//    include to resume training exactly.
-
 package rnn
 
 import (
@@ -56,14 +12,10 @@ import (
 	"github.com/ppvan/gpt/pkg/data"
 )
 
-// ── constants ────────────────────────────────────────────────────────────────
-
 const (
 	ckptMagic   = "GPTCKPT\x00"
 	ckptVersion = uint32(1)
 )
-
-// ── header types (serialised as JSON) ────────────────────────────────────────
 
 type ckptArch struct {
 	VocabSize  int `json:"vocab_size"`
@@ -71,8 +23,6 @@ type ckptArch struct {
 	HiddenSize int `json:"hidden_size"`
 }
 
-// tensorEntry describes one named tensor inside the flat blob.
-// Offset and Len are in float32 units (multiply by 4 for byte offsets).
 type tensorEntry struct {
 	Rows   int `json:"rows"`
 	Cols   int `json:"cols"`
@@ -86,18 +36,11 @@ type adamState struct {
 	T map[string]int         `json:"t"`
 }
 
-// ckptVocab is the wire representation of data.Vocab embedded in the header.
-// Tokens are ordinary JSON strings – JSON is UTF-8 natively, so multi-word
-// or multi-byte tokens (e.g. Vietnamese words with diacritics) round-trip
-// exactly without any special encoding.
 type ckptVocab struct {
 	TokenToIdx map[string]int `json:"token_to_idx"`
 	IdxToToken []string       `json:"idx_to_token"`
 }
 
-// ckptOptions is the wire representation of data.Options embedded in the
-// header, so a prompt can be tokenized identically to the training corpus
-// at inference time without the caller having to know or re-specify them.
 type ckptOptions struct {
 	Lowercase bool `json:"lowercase"`
 	MinFreq   int  `json:"min_freq"`
@@ -111,9 +54,6 @@ type ckptHeader struct {
 	Adam    *adamState             `json:"adam,omitempty"`
 }
 
-// ── SaveOptions ───────────────────────────────────────────────────────────────
-
-// SaveOptions controls what gets written into the checkpoint.
 type SaveOptions struct {
 	// Vocab, if non-nil, is embedded in the checkpoint header so the file is
 	// fully self-contained and can be used for inference without the original
@@ -131,11 +71,6 @@ type SaveOptions struct {
 	Optimizer core.Optimizer
 }
 
-// ── Save ─────────────────────────────────────────────────────────────────────
-
-// Save writes a checkpoint of m to path.
-// If opts.Optimizer is a *core.Adam its internal state is included so
-// that training can be resumed via Load + LoadAdam.
 func Save(path string, m *CharRNN, opts SaveOptions) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -145,9 +80,6 @@ func Save(path string, m *CharRNN, opts SaveOptions) error {
 	return write(f, m, opts)
 }
 
-// ── Load ─────────────────────────────────────────────────────────────────────
-
-// LoadResult bundles everything read back from a checkpoint.
 type LoadResult struct {
 	Model *CharRNN
 	// Vocab is non-nil when the checkpoint was saved with a Vocab.
@@ -161,9 +93,6 @@ type LoadResult struct {
 	Adam *core.Adam
 }
 
-// Load reads a checkpoint from path and reconstructs the CharRNN.
-// If the file contains Adam state, LoadResult.Adam is populated and can
-// be passed directly to CharRNN.Train.
 func Load(path string) (LoadResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -172,8 +101,6 @@ func Load(path string) (LoadResult, error) {
 	defer f.Close()
 	return read(f)
 }
-
-// ── internal write ────────────────────────────────────────────────────────────
 
 func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 	// ── 1. collect tensors ───────────────────────────────────────────────
@@ -271,8 +198,6 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 
 	return nil
 }
-
-// ── internal read ─────────────────────────────────────────────────────────────
 
 func read(r io.Reader) (LoadResult, error) {
 	// magic
@@ -389,10 +314,6 @@ func read(r io.Reader) (LoadResult, error) {
 	}, nil
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-// matWeights returns a copy of the underlying float32 slice.
-// Mat does not export its weights field, so we use Get row-by-row.
 func matWeights(m core.Mat) []float32 {
 	out := make([]float32, m.Rows*m.Columns)
 	for r := 0; r < m.Rows; r++ {
@@ -413,5 +334,4 @@ func validateEntry(e tensorEntry, blobLen int) error {
 	return nil
 }
 
-// float32frombits wraps math.Float32frombits for local readability.
 func float32frombits(b uint32) float32 { return math.Float32frombits(b) }

@@ -10,10 +10,6 @@ import (
 	"unicode"
 )
 
-// Special tokens, mirroring txt.Corpus's reserved ids so both packages agree
-// on layout if you ever share a vocab format between them. STORY marks the
-// start of a new document (one per file loaded via LoadCorpus) so the model
-// can learn story boundaries instead of seeing one endless stream of text.
 const (
 	PAD   = "<PAD>"
 	UNK   = "<UNK>"
@@ -28,9 +24,6 @@ const (
 	STORY_ID = 4
 )
 
-// specialTokens are literal markers that pass through tokenization untouched
-// — never lowercased, never punctuation-trimmed, never counted as ordinary
-// vocabulary words subject to MinFreq pruning.
 var specialTokens = map[string]struct{}{
 	PAD:   {},
 	UNK:   {},
@@ -44,7 +37,6 @@ func isSpecialToken(s string) bool {
 	return ok
 }
 
-// Options controls text normalization and vocab pruning for word tokenization.
 type Options struct {
 	Lowercase bool
 	// MinFreq drops tokens occurring fewer than MinFreq times from the
@@ -52,8 +44,6 @@ type Options struct {
 	MinFreq int
 }
 
-// DefaultOptions is a reasonable starting point: lowercase everything, and
-// drop hapax legomena into UNK (same MinFreq txt.Corpus.BuildVocab uses).
 var DefaultOptions = Options{Lowercase: true, MinFreq: 2}
 
 type Vocab struct {
@@ -65,7 +55,6 @@ func (v *Vocab) VocabSize() int {
 	return len(v.IdxToToken)
 }
 
-// LoadText reads a single file's contents.
 func LoadText(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -74,12 +63,6 @@ func LoadText(path string) (string, error) {
 	return string(b), nil
 }
 
-// LoadCorpus walks dir recursively and concatenates every .txt file it finds
-// (separated by a blank line), the same file discovery txt.LoadCorpus uses.
-// Each file is treated as one story: its content is prefixed with the
-// STORY marker so the tokenized stream carries explicit document
-// boundaries. It returns one big string rather than per-sentence records
-// since this package trains on a flat token stream, not sentence pairs.
 func LoadCorpus(dir string) (string, error) {
 	var sb strings.Builder
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -122,10 +105,6 @@ func loadFile(path string) (string, error) {
 	return string(b), nil
 }
 
-// Normalize applies the options' text normalization (currently just
-// lowercasing) to a standalone string. Tokenize does this per-token instead
-// so it can skip special tokens like <STORY>, but Normalize is kept as a
-// standalone helper for anywhere else you want the same rule applied.
 func Normalize(text string, opts Options) string {
 	if opts.Lowercase {
 		text = strings.ToLower(text)
@@ -133,30 +112,15 @@ func Normalize(text string, opts Options) string {
 	return text
 }
 
-// keepPunct is the punctuation emitted as standalone vocabulary tokens
-// instead of being discarded. Sentence enders (. ! ? …) give the model and
-// the sampler explicit sentence boundaries; commas/colons/semicolons give it
-// clause rhythm; dashes cover Nam Cao's dialogue lines ("- Cậu Vàng đi đời
-// rồi, ông giáo ạ!"). Quotes and brackets are still dropped: they come in
-// pairs the model can't reliably balance, so keeping them just produces
-// dangling quote marks in generated text.
 var keepPunct = map[rune]struct{}{
 	'.': {}, ',': {}, '!': {}, '?': {}, ';': {}, ':': {},
 	'…': {}, '—': {}, '–': {}, '-': {},
 }
 
-// SentenceEnders are the tokens that terminate a sentence in generated
-// output. Exported so generation code can count sentences while sampling.
 var SentenceEnders = map[string]struct{}{
 	".": {}, "!": {}, "?": {}, "…": {},
 }
 
-// Tokenize splits text into whitespace-separated word tokens, normalizing
-// (lowercasing) each — except for special tokens like <STORY>, which pass
-// through exactly as written. Leading/trailing punctuation is split off into
-// standalone tokens (for runes in keepPunct) rather than discarded, so the
-// model can learn — and emit — sentence structure. Interior punctuation
-// (anh-hùng) stays inside its word.
 func Tokenize(text string, opts Options) []string {
 	raw := strings.Fields(text)
 	tokens := make([]string, 0, len(raw)*2)
@@ -177,10 +141,6 @@ func isPunctOrSym(r rune) bool {
 	return unicode.IsPunct(r) || unicode.IsSymbol(r)
 }
 
-// appendWordTokens splits word into up to three parts — leading punctuation,
-// the core word, trailing punctuation — and appends each as tokens. Edge
-// punctuation in keepPunct becomes its own token; other edge symbols are
-// dropped as before.
 func appendWordTokens(tokens []string, word string) []string {
 	runes := []rune(word)
 	i, j := 0, len(runes)
@@ -197,9 +157,6 @@ func appendWordTokens(tokens []string, word string) []string {
 	return appendPunctTokens(tokens, runes[j:])
 }
 
-// appendPunctTokens emits one token per keepPunct rune, collapsing any run
-// of two or more '.' into a single '…' token (Nam Cao's "..." is an
-// ellipsis, not three sentence breaks).
 func appendPunctTokens(tokens []string, runes []rune) []string {
 	dots := 0
 	for _, r := range runes {
@@ -226,10 +183,6 @@ func flushDots(tokens []string, dots int) []string {
 	return tokens
 }
 
-// BuildVocab tokenizes text per opts and builds a Vocab, reserving
-// PAD/UNK/BOS/EOS/STORY at ids 0-4 the same way txt.Corpus.BuildVocab
-// reserves its special tokens. Tokens occurring fewer than opts.MinFreq
-// times are excluded from the vocab and fall back to UNK at encode time.
 func BuildVocab(text string, opts Options) *Vocab {
 	if opts.MinFreq < 1 {
 		opts.MinFreq = 1
@@ -279,10 +232,6 @@ func BuildVocab(text string, opts Options) *Vocab {
 	return &Vocab{TokenToIdx: tokenToIdx, IdxToToken: idxToToken}
 }
 
-// Encode tokenizes text per opts and converts it to vocabulary ids, wrapped
-// in BOS/EOS. Tokens absent from the vocab (below MinFreq, or unseen at
-// train time) map to UNK instead of erroring, so encoding never fails on
-// new input.
 func (v *Vocab) Encode(text string, opts Options) []int {
 	tokens := Tokenize(text, opts)
 	ids := make([]int, 0, len(tokens)+2)
@@ -298,13 +247,6 @@ func (v *Vocab) Encode(text string, opts Options) []int {
 	return ids
 }
 
-// Decode converts ids back into text, dropping PAD/BOS/EOS markers and
-// joining the remaining word tokens with spaces. STORY is kept in the
-// output (rather than stripped like the other special tokens) since it's a
-// meaningful boundary marker for generated multi-story text, not just
-// sequence padding.
-// noSpaceBefore lists tokens that attach to the preceding word ("rồi," not
-// "rồi ,") when decoding.
 var noSpaceBefore = map[string]struct{}{
 	".": {}, ",": {}, "!": {}, "?": {}, ";": {}, ":": {}, "…": {},
 }
@@ -332,26 +274,6 @@ func SplitData(ids []int, trainRatio float32) (train, val []int) {
 	return ids[:n], ids[n:]
 }
 
-// ── batched streaming ─────────────────────────────────────────────────────────
-
-// SeqBatcher yields time-major minibatches of B parallel character streams.
-//
-// The corpus is cut into B contiguous chunks and each chunk gets its own
-// cursor. Every cursor advances by seqLen per call, so a stream resumes exactly
-// where it stopped on the previous step — the stateful-BPTT property the
-// single-stream loop had, now B times wider:
-//
-//	ids  ┌───── stream 0 ─────┬───── stream 1 ─────┬───── stream 2 ─────┐
-//	     │ ....▓▓▓▓▓.........  │ ....▓▓▓▓▓.........  │ ....▓▓▓▓▓......... │
-//	          ^offset               ^offset               ^offset
-//
-// Chunking (rather than sliding B adjacent windows) is what makes the streams
-// decorrelated: at any step the B rows come from B distant parts of the text,
-// so the gradient is an average over genuinely different contexts.
-//
-// Note: ids here are vocabulary ids (one per rune), already produced by
-// Encode/(*Vocab).Encode, so this type is Unicode-agnostic — it never touches
-// raw bytes or runes itself.
 type SeqBatcher struct {
 	ids    []int
 	batch  int
@@ -366,7 +288,6 @@ type SeqBatcher struct {
 	xrows, yrows [][]int
 }
 
-// NewSeqBatcher splits ids into batch parallel streams of seqLen-long windows.
 func NewSeqBatcher(ids []int, batch, seqLen int) (*SeqBatcher, error) {
 	if batch <= 0 {
 		batch = 1
@@ -406,24 +327,10 @@ func NewSeqBatcher(ids []int, batch, seqLen int) (*SeqBatcher, error) {
 func (b *SeqBatcher) Batch() int  { return b.batch }
 func (b *SeqBatcher) SeqLen() int { return b.seqLen }
 
-// WindowsPerEpoch is how many Next calls consume the corpus once.
 func (b *SeqBatcher) WindowsPerEpoch() int { return b.span / b.seqLen }
 
-// Reset rewinds every stream to the start of its chunk.
 func (b *SeqBatcher) Reset() { b.offset = 0 }
 
-// Next returns one minibatch in time-major layout: len(xs) == seqLen and each
-// xs[t] holds one character per stream — exactly the [][]int that
-// (*CharRNN).ForwardSeq consumes. ys[t] is the same window shifted by one.
-//
-// wrapped reports that the cursors were rewound before filling this batch, so
-// the hidden state carried in from the previous step is stale and the caller
-// should reinitialise it.
-//
-// The returned slices alias scratch owned by the batcher and are overwritten by
-// the following call; consume or copy them within the step. The training loop
-// finishes forward and backward before asking for the next batch, so this is
-// safe there even though embeddingCache retains the id slices.
 func (b *SeqBatcher) Next() (xs, ys [][]int, wrapped bool) {
 	if b.offset+b.seqLen > b.span {
 		b.offset = 0
