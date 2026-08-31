@@ -167,7 +167,7 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	if model == nil {
 		embedSize := cmd.Int("embed")
 		hiddenSize := cmd.Int("hidden")
-		model = rnn.NewCharLSTM(vocab.VocabSize(), int(embedSize), int(hiddenSize))
+		model = rnn.NewCharGRU(vocab.VocabSize(), int(embedSize), int(hiddenSize))
 	}
 
 	totalParams := 0
