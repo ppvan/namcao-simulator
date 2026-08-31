@@ -8,7 +8,7 @@ type Linear struct {
 }
 
 type linearCache struct {
-	input core.Mat // x, needed for dW = x^T * dOut
+	input core.Mat
 }
 
 func NewLinear(inputs, outputs int) *Linear {

@@ -6,11 +6,6 @@ import (
 	"strings"
 )
 
-const (
-	tileM = 32
-	tileK = 32
-)
-
 type Mat struct {
 	weights []float32
 	Rows    int
@@ -144,7 +139,7 @@ func (mat Mat) Dot(other Mat) Mat {
 }
 
 func dotInto(a, b, result []float32, m, n, p int) {
-	dotTiled(a, b, result, 0, m, n, p, 0, p)
+	dotIntoGPU(a, b, result, m, n, p)
 }
 
 func (mat Mat) DotT(other Mat) Mat {

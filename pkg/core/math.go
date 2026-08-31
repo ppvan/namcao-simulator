@@ -3,19 +3,13 @@ package core
 import "math"
 
 const (
-	expA32 = float32(12102203.0)         // 2^23 / ln(2)
-	expB32 = int32(127*(1<<23)) - 486411 // bias, tuned to minimize FastExp32's error
-	logB32 = int32(127 * (1 << 23))      // exact (untuned) bias, used for FastLog32
-	// NOTE: expB32 and logB32 are deliberately different constants. They are
-	// two independent empirical bit-hacks (Schraudolph-style), not exact
-	// mathematical inverses of each other. Reusing expB32 inside FastLog32
-	// introduces a constant additive bias (~0.04 in log-space) that is
-	// small on its own but blows up exponentially in anything that raises
-	// FastLog32's result to a large power (e.g. FastPow32 with big exponents).
+	expA32 = float32(12102203.0)
+	expB32 = int32(127*(1<<23)) - 486411
+	logB32 = int32(127 * (1 << 23))
 )
 
 func FastExp32(x float32) float32 {
-	if x > 88 { // avoid overflow, matches float32 exp(x) saturation point
+	if x > 88 {
 		return math.MaxFloat32
 	}
 	if x < -88 {
@@ -23,9 +17,7 @@ func FastExp32(x float32) float32 {
 	}
 	i := int32(expA32*x) + expB32
 	if i <= 0 {
-		// The -88 guard above is slightly too generous: the bit pattern goes
-		// negative at x ~= -87.988, and uint32(negative) is a NaN/-Inf
-		// encoding. Underflow to zero instead.
+
 		return 0
 	}
 	return math.Float32frombits(uint32(i))
@@ -51,7 +43,7 @@ func FastInvSqrt32(x float32) float32 {
 	i := math.Float32bits(x)
 	i = 0x5f3759df - (i >> 1)
 	y := math.Float32frombits(i)
-	y = y * (1.5 - xhalf*y*y) // Newton-Raphson iteration #1
+	y = y * (1.5 - xhalf*y*y)
 	return y
 }
 
@@ -92,7 +84,7 @@ func FastTanh32(x float32) float32 {
 		return -1
 	}
 	x2 := x * x
-	// Pade [3/2] approximant of tanh, tuned for float32 use.
+
 	a := x * (135135 + x2*(17325+x2*(378+x2)))
 	b := 135135 + x2*(62370+x2*(3150+x2*28))
 	return a / b

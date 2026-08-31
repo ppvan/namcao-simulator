@@ -27,7 +27,7 @@ type tensorEntry struct {
 	Rows   int `json:"rows"`
 	Cols   int `json:"cols"`
 	Offset int `json:"offset"`
-	Len    int `json:"len"` // == Rows*Cols, redundant but handy for validation
+	Len    int `json:"len"`
 }
 
 type adamState struct {
@@ -55,19 +55,10 @@ type ckptHeader struct {
 }
 
 type SaveOptions struct {
-	// Vocab, if non-nil, is embedded in the checkpoint header so the file is
-	// fully self-contained and can be used for inference without the original
-	// text corpus.
 	Vocab *data.Vocab
 
-	// TokenizeOptions is embedded alongside Vocab so a prompt at inference
-	// time can be tokenized (lowercased, etc.) exactly the way the training
-	// corpus was. Only meaningful when Vocab is also set.
 	TokenizeOptions data.Options
 
-	// Optimizer, if non-nil and pointing to a *core.Adam, causes the Adam
-	// moment buffers and step counters to be written alongside the weights
-	// so that training can be resumed without warmup bias.
 	Optimizer core.Optimizer
 }
 
@@ -82,14 +73,11 @@ func Save(path string, m *CharRNN, opts SaveOptions) error {
 
 type LoadResult struct {
 	Model *CharRNN
-	// Vocab is non-nil when the checkpoint was saved with a Vocab.
-	// It is needed for inference (encoding prompts and decoding output).
+
 	Vocab *data.Vocab
-	// TokenizeOptions is populated whenever Vocab is, and should be passed
-	// to data.Tokenize/Vocab.Encode when processing a prompt so it matches
-	// how the training corpus was tokenized.
+
 	TokenizeOptions data.Options
-	// Adam is non-nil only when the checkpoint contained optimizer state.
+
 	Adam *core.Adam
 }
 
@@ -103,7 +91,7 @@ func Load(path string) (LoadResult, error) {
 }
 
 func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
-	// ── 1. collect tensors ───────────────────────────────────────────────
+
 	params := m.Params()
 
 	var blob []float32
@@ -121,7 +109,6 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 		}
 	}
 
-	// ── 2. optional Adam state ───────────────────────────────────────────
 	var hdrAdam *adamState
 	if adam, ok := opts.Optimizer.(*core.Adam); ok && adam != nil {
 		hdrAdam = &adamState{
@@ -143,7 +130,6 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 		}
 	}
 
-	// ── 3. encode header JSON ────────────────────────────────────────────
 	var hdrVocab *ckptVocab
 	var hdrOptions *ckptOptions
 	if opts.Vocab != nil {
@@ -173,25 +159,23 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 		return fmt.Errorf("checkpoint save: marshal header: %w", err)
 	}
 
-	// ── 4. write file ────────────────────────────────────────────────────
-	// magic
 	if _, err := io.WriteString(w, ckptMagic); err != nil {
 		return fmt.Errorf("checkpoint save: write magic: %w", err)
 	}
-	// version
+
 	if err := binary.Write(w, binary.LittleEndian, ckptVersion); err != nil {
 		return fmt.Errorf("checkpoint save: write version: %w", err)
 	}
-	// header length
+
 	hdrLen := uint32(len(hdrJSON))
 	if err := binary.Write(w, binary.LittleEndian, hdrLen); err != nil {
 		return fmt.Errorf("checkpoint save: write header length: %w", err)
 	}
-	// header
+
 	if _, err := w.Write(hdrJSON); err != nil {
 		return fmt.Errorf("checkpoint save: write header: %w", err)
 	}
-	// tensor blob
+
 	if err := binary.Write(w, binary.LittleEndian, blob); err != nil {
 		return fmt.Errorf("checkpoint save: write tensor blob: %w", err)
 	}
@@ -200,7 +184,7 @@ func write(w io.Writer, m *CharRNN, opts SaveOptions) error {
 }
 
 func read(r io.Reader) (LoadResult, error) {
-	// magic
+
 	magic := make([]byte, len(ckptMagic))
 	if _, err := io.ReadFull(r, magic); err != nil {
 		return LoadResult{}, fmt.Errorf("checkpoint load: read magic: %w", err)
@@ -209,7 +193,6 @@ func read(r io.Reader) (LoadResult, error) {
 		return LoadResult{}, fmt.Errorf("checkpoint load: bad magic %q", magic)
 	}
 
-	// version
 	var version uint32
 	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
 		return LoadResult{}, fmt.Errorf("checkpoint load: read version: %w", err)
@@ -218,13 +201,11 @@ func read(r io.Reader) (LoadResult, error) {
 		return LoadResult{}, fmt.Errorf("checkpoint load: unsupported version %d (want %d)", version, ckptVersion)
 	}
 
-	// header length
 	var hdrLen uint32
 	if err := binary.Read(r, binary.LittleEndian, &hdrLen); err != nil {
 		return LoadResult{}, fmt.Errorf("checkpoint load: read header length: %w", err)
 	}
 
-	// header JSON
 	hdrJSON := make([]byte, hdrLen)
 	if _, err := io.ReadFull(r, hdrJSON); err != nil {
 		return LoadResult{}, fmt.Errorf("checkpoint load: read header: %w", err)
@@ -234,7 +215,6 @@ func read(r io.Reader) (LoadResult, error) {
 		return LoadResult{}, fmt.Errorf("checkpoint load: parse header: %w", err)
 	}
 
-	// tensor blob – read the rest of the file
 	blobBytes, err := io.ReadAll(r)
 	if err != nil {
 		return LoadResult{}, fmt.Errorf("checkpoint load: read tensor blob: %w", err)
@@ -248,7 +228,6 @@ func read(r io.Reader) (LoadResult, error) {
 		blob[i] = float32frombits(bits)
 	}
 
-	// ── reconstruct model ────────────────────────────────────────────────
 	arch := hdr.Arch
 	model := NewCharLSTM(arch.VocabSize, arch.EmbedSize, arch.HiddenSize)
 
@@ -263,10 +242,9 @@ func read(r io.Reader) (LoadResult, error) {
 	}
 	model.SetParams(params)
 
-	// ── reconstruct Adam (optional) ──────────────────────────────────────
 	var restoredAdam *core.Adam
 	if hdr.Adam != nil {
-		adam := core.NewAdam(0, 0, 0, 0) // hyperparams are stored externally; caller sets them
+		adam := core.NewAdam(0, 0, 0, 0)
 		mMap := make(map[string]core.Mat, len(hdr.Adam.M))
 		for name, e := range hdr.Adam.M {
 			if err := validateEntry(e, len(blob)); err != nil {
@@ -289,7 +267,6 @@ func read(r io.Reader) (LoadResult, error) {
 		restoredAdam = adam
 	}
 
-	// ── restore vocab + tokenize options (optional) ──────────────────────
 	var restoredVocab *data.Vocab
 	var restoredOptions data.Options
 	if hdr.Vocab != nil {

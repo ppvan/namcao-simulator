@@ -5,9 +5,9 @@ import (
 )
 
 type LSTMCell struct {
-	W core.Mat // input weights,  (inputSize, 4*hiddenSize)
-	U core.Mat // hidden weights, (hiddenSize, 4*hiddenSize)
-	B core.Mat // biases,         (1, 4*hiddenSize)
+	W core.Mat
+	U core.Mat
+	B core.Mat
 
 	hiddenSize int
 }
@@ -17,7 +17,6 @@ type lstmCellCache struct {
 	hPrev core.Mat
 	cPrev core.Mat
 
-	// z is the fused post-activation matrix (batch, 4h), column layout f|i|o|g.
 	z core.Mat
 
 	tanhC core.Mat
@@ -46,10 +45,8 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	hPrev, cPrev := prev[0], prev[1]
 	h := c.hiddenSize
 
-	// all four gate pre-activations in two matmuls
 	z := x.Dot(c.W).AddInPlace(hPrev.Dot(c.U)).AddBiasInPlace(c.B)
 
-	// sigmoid on the f|i|o blocks, tanh on the g block, in place
 	z.ApplyColsInPlace(0, 3*h, core.FastSigmoid32)
 	z.ApplyColsInPlace(3*h, 4*h, core.FastTanh32)
 
@@ -58,7 +55,7 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	o := z.SliceCols(2*h, 3*h)
 	g := z.SliceCols(3*h, 4*h)
 
-	cNext := f.MulAdd(cPrev, i, g) // f⊙cPrev + i⊙g in one pass
+	cNext := f.MulAdd(cPrev, i, g)
 	tanhC := cNext.Apply(core.FastTanh32)
 	hNext := o.Hadamard(tanhC)
 
@@ -66,7 +63,7 @@ func (c *LSTMCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 		x:     x,
 		hPrev: hPrev,
 		cPrev: cPrev,
-		z:     z, // full (batch,4h) post-activation matrix
+		z:     z,
 		tanhC: tanhC,
 	}
 

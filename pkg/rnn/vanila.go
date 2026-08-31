@@ -32,8 +32,7 @@ func (c *RecurentCell) InitState(batch int) State {
 
 func (c *RecurentCell) Step(x core.Mat, prev State) (next State, cache core.Cache) {
 	hPrev := prev[0]
-	// x.Dot(Wx) is a fresh buffer, so accumulate and activate in place:
-	// 4 allocations per step become 2.
+
 	z := x.Dot(c.Wx).AddInPlace(hPrev.Dot(c.Wh)).AddBiasInPlace(c.Bh)
 	hNext := z.ApplyInPlace(core.FastTanh32)
 	return State{hNext}, rnnCellCache{x: x, hPrev: hPrev, hNext: hNext}
@@ -42,11 +41,8 @@ func (c *RecurentCell) Step(x core.Mat, prev State) (next State, cache core.Cach
 func (c *RecurentCell) BackwardStep(cache core.Cache, dNext State) (dx core.Mat, dPrev State, grads core.Grads) {
 	cc := cache.(rnnCellCache)
 
-	// dz = dNext ⊙ (1 - hNext²) fused into one pass, without
-	// materializing the derivative matrix
 	dz := dNext[0].HadamardApply(cc.hNext, core.FastDTanh32)
 
-	// TDot / DotT avoid materializing the transposed operands
 	dWx := cc.x.TDot(dz)
 	dWh := cc.hPrev.TDot(dz)
 	dBh := dz.SumRows()
@@ -84,9 +80,7 @@ func newRnnLinear(inputs, outputs int) *rnnLinear {
 }
 
 func (l *rnnLinear) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
-	// Dot result is fresh, so the bias add can mutate it in place.
-	// For a char model this is the big (batch x hidden)·(hidden x vocab)
-	// projection, so skipping the broadcast+add copies matters.
+
 	out = x.Dot(l.weights).AddBiasInPlace(l.biases)
 	return out, rnnLinearCache{input: x}
 }
@@ -213,9 +207,6 @@ func (m *CharRNN) BackwardSeq(cache core.Cache, dLogits []core.Mat) (grads core.
 	for t := T - 1; t >= 0; t-- {
 		dh := m.Output.BackwardInto(sc.outCaches[t], dLogits[t], dWy, dBy)
 
-		// dState[0] is either the fresh InitState buffer (first
-		// iteration) or the fresh dPrev returned by BackwardStep, so
-		// mutating it in place is safe and avoids a per-step copy.
 		dState[0] = dState[0].AddInPlace(dh)
 
 		dEmb, dPrev := m.Cell.BackwardStepInto(sc.cellCaches[t], dState, cellAcc)

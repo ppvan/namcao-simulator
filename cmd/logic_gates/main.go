@@ -11,7 +11,7 @@ import (
 
 func main() {
 	xor()
-	// nand()
+
 }
 
 func xor() {

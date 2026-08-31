@@ -7,8 +7,8 @@ type Grads map[string]Mat
 type Params map[string]Mat
 
 type Parameter interface {
-	Params() Params   // read current parameter values
-	SetParams(Params) // write updated parameter values back
+	Params() Params
+	SetParams(Params)
 }
 
 type Optimizer interface {
@@ -75,16 +75,13 @@ func (r *RMSProp) Update(name string, param, grad Mat) Mat {
 		s = NewZeroMat(grad.Rows, grad.Columns)
 	}
 
-	// grad²
 	grad2 := grad.Hadamard(grad)
 
-	// running average
 	s = s.Scale(r.Beta).
 		Add(grad2.Scale(1 - r.Beta))
 
 	r.avgSq[name] = s
 
-	// sqrt(s) + eps
 	term := s.
 		Apply(FastSqrt32).
 		Apply(func(v float32) float32 {
@@ -148,8 +145,6 @@ func (a *Adam) Update(name string, param, grad Mat) Mat {
 	corr1 := 1 - PowIntApprox32(a.Beta1, t)
 	corr2 := 1 - PowIntApprox32(a.Beta2, t)
 
-	// One fused pass over the parameter instead of twelve allocating ones.
-	// m and v are updated in place and kept across steps.
 	AdamStep(param, grad, m, v, a.Rate, a.Beta1, a.Beta2, a.Epsilon, corr1, corr2)
 	return param
 }

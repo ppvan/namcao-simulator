@@ -17,6 +17,11 @@ import (
 const version = "0.1.0"
 
 func main() {
+	if err := core.InitGPU(); err != nil {
+		fmt.Fprintf(os.Stderr, "quirrell: GPU init failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	app := &cli.Command{
 		Name:    "quirrell",
 		Usage:   "character-level LSTM – train and generate text",
@@ -113,18 +118,14 @@ func trainCmd() *cli.Command {
 }
 
 func runTrain(ctx context.Context, cmd *cli.Command) error {
-	// ── positional arg: output path ───────────────────────────────────────
+
 	if cmd.NArg() == 0 {
 		return fmt.Errorf("missing argument: provide a path for the checkpoint, e.g. model.bin")
 	}
 	modelPath := cmd.Args().First()
 
-	// tokenizeOpts is the single source of truth for how text gets
-	// tokenized in this run. It's saved into the checkpoint below so
-	// `predict` can reproduce it exactly rather than hardcoding its own copy.
 	tokenizeOpts := data.DefaultOptions
 
-	// ── load corpus ───────────────────────────────────────────────────────
 	dataPath := cmd.String("data")
 	fmt.Printf("quirrell: loading corpus from %q\n", dataPath)
 	text, err := data.LoadCorpus(dataPath)
@@ -140,7 +141,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	fmt.Printf("quirrell: corpus %d chars | vocab %d | train %d | val %d\n",
 		len(text), vocab.VocabSize(), len(train), len(val))
 
-	// ── model + optimizer ─────────────────────────────────────────────────
 	lr := float32(cmd.Float("lr"))
 	opt := core.NewAdam(lr, 0.9, 0.999, 1e-8)
 
@@ -170,7 +170,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		model = rnn.NewCharLSTM(vocab.VocabSize(), int(embedSize), int(hiddenSize))
 	}
 
-	// ── print param count ─────────────────────────────────────────────────
 	totalParams := 0
 	for _, p := range model.Params() {
 		totalParams += p.Rows * p.Columns
@@ -182,9 +181,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		batch = 1
 	}
 
-	// The live BPTT cache stays resident between forward and backward. Once
-	// batch*seqLen pushes it past L3 the backward pass becomes a DRAM stream
-	// and chars/s drops, so surface it before committing to a long run.
 	hidden := model.HiddenSize()
 	cacheMB := float64(batch*seqLen*(7*hidden+model.Embed.Weights.Columns)*4) / 1e6
 
@@ -194,7 +190,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	fmt.Printf("quirrell: %d chars/step | BPTT cache %.1f MB | %.1f epochs (%d chars)\n",
 		batch*seqLen, cacheMB, float64(totalChars)/float64(len(train)), totalChars)
 
-	// ── train ─────────────────────────────────────────────────────────────
 	cfg := rnn.TrainConfig{
 		Batch:       batch,
 		SeqLen:      seqLen,
@@ -214,7 +209,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 		elapsed.Round(time.Second),
 		float64(totalChars)/elapsed.Seconds())
 
-	// ── save checkpoint ───────────────────────────────────────────────────
 	saveOpts := rnn.SaveOptions{Vocab: vocab, TokenizeOptions: tokenizeOpts}
 	if !cmd.Bool("no-optimizer-state") {
 		saveOpts.Optimizer = opt
@@ -228,7 +222,6 @@ func runTrain(ctx context.Context, cmd *cli.Command) error {
 	info, _ := os.Stat(modelPath)
 	fmt.Printf("quirrell: checkpoint written (%.2f MB)\n", float64(info.Size())/1e6)
 
-	// ── quick sample after training ───────────────────────────────────────
 	fmt.Println("\n── sample (temperature 0.8) ─────────────────────────────────")
 	sample := generateText(model, vocab, "Tôi ", 300, 0, 0.8, tokenizeOpts, rand.New(rand.NewSource(42)))
 	fmt.Println(sample)
@@ -283,13 +276,12 @@ func predictCmd() *cli.Command {
 }
 
 func runPredict(_ context.Context, cmd *cli.Command) error {
-	// ── positional arg: checkpoint path ──────────────────────────────────
+
 	if cmd.NArg() == 0 {
 		return fmt.Errorf("missing argument: provide a checkpoint path, e.g. model.bin")
 	}
 	modelPath := cmd.Args().First()
 
-	// ── load ──────────────────────────────────────────────────────────────
 	fmt.Fprintf(os.Stderr, "quirrell: loading %q\n", modelPath)
 	res, err := rnn.Load(modelPath)
 	if err != nil {
@@ -301,9 +293,7 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 
 	model := res.Model
 	vocab := res.Vocab
-	// tokenizeOpts came from training (saved into the checkpoint), so the
-	// prompt below gets tokenized exactly the way the corpus was — no
-	// separate flag or hardcoded default to keep in sync by hand.
+
 	tokenizeOpts := res.TokenizeOptions
 	totalParams := 0
 	for _, p := range model.Params() {
@@ -312,7 +302,6 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	fmt.Fprintf(os.Stderr, "quirrell: vocab %d | embed %d | hidden %d | param %d\n\n",
 		vocab.VocabSize(), model.Embed.Weights.Columns, model.HiddenSize(), totalParams)
 
-	// ── seed ──────────────────────────────────────────────────────────────
 	seedVal := cmd.Int("seed")
 	var rngSeed int64
 	if seedVal == 0 {
@@ -322,7 +311,6 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	}
 	rng := rand.New(rand.NewSource(rngSeed))
 
-	// ── generate ──────────────────────────────────────────────────────────
 	prompt := cmd.String("prompt")
 	length := int(cmd.Int("length"))
 	sentences := int(cmd.Int("sentences"))
@@ -333,7 +321,7 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 	if cmd.Bool("show-prompt") {
 		fmt.Print(output)
 	} else {
-		// strip the prompt prefix from the output
+
 		if len(output) > len(prompt) {
 			fmt.Print(output[len(prompt):])
 		} else {
@@ -346,8 +334,7 @@ func runPredict(_ context.Context, cmd *cli.Command) error {
 }
 
 func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, maxTokens, sentences int, temperature float32, opts data.Options, rng *rand.Rand) string {
-	// tokenize the prompt the same way the corpus was tokenized for
-	// training, so casing/punctuation rules match what the vocab expects.
+
 	tokens := data.Tokenize(prompt, opts)
 
 	seedIDs := make([]int, 0, len(tokens))
@@ -361,19 +348,13 @@ func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, maxToken
 	}
 
 	if len(seedIDs) == 0 {
-		// pick a random start token
+
 		seedIDs = []int{rng.Intn(vocab.VocabSize())}
 		fmt.Fprintln(os.Stderr, "quirrell: empty seed after tokenizing – using a random start token")
 	}
 
-	// Specials are structural markers, not prose: force their probability to
-	// zero so generation can never emit <UNK> (or restart the document with
-	// <BOS>/<STORY>) no matter how much weight the model learned to give them.
 	banned := []int{data.PAD_ID, data.UNK_ID, data.BOS_ID, data.EOS_ID, data.STORY_ID}
 
-	// With sentences > 0, stop as soon as that many sentence-final tokens
-	// have been emitted; maxTokens stays as a hard cap so a model that never
-	// produces '.' can't run away.
 	var stop func(id int) bool
 	if sentences > 0 {
 		count := 0
@@ -390,7 +371,6 @@ func generateText(model *rnn.CharRNN, vocab *data.Vocab, prompt string, maxToken
 
 	generated := model.SampleMasked(seedIDs, maxTokens, temperature, banned, stop, rng)
 
-	// decode: seed + generated
 	all := append(append([]int(nil), seedIDs...), generated...)
 	return vocab.Decode(all)
 }

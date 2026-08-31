@@ -144,7 +144,6 @@ func (d Data) Batches(size int) []Batch {
 		return nil
 	}
 
-	// build index order
 	indices := make([]int, n)
 	for i := 0; i < n; i++ {
 		indices[i] = i

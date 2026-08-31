@@ -39,8 +39,7 @@ func isSpecialToken(s string) bool {
 
 type Options struct {
 	Lowercase bool
-	// MinFreq drops tokens occurring fewer than MinFreq times from the
-	// vocabulary; they fall back to UNK at encode time.
+
 	MinFreq int
 }
 
@@ -193,8 +192,7 @@ func BuildVocab(text string, opts Options) *Vocab {
 	freq := make(map[string]int, len(tokens))
 	for _, t := range tokens {
 		if isSpecialToken(t) {
-			// Already reserved below; don't let it compete for a second id
-			// or get pruned by MinFreq like an ordinary word.
+
 			continue
 		}
 		freq[t]++
@@ -279,11 +277,10 @@ type SeqBatcher struct {
 	batch  int
 	seqLen int
 
-	span   int   // ids owned by each stream, excluding the +1 target lookahead
-	starts []int // first index of each stream
-	offset int   // shared read offset inside every stream
+	span   int
+	starts []int
+	offset int
 
-	// Scratch reused across Next calls; see the note on Next.
 	xbuf, ybuf   []int
 	xrows, yrows [][]int
 }
@@ -296,7 +293,6 @@ func NewSeqBatcher(ids []int, batch, seqLen int) (*SeqBatcher, error) {
 		return nil, fmt.Errorf("data: seqLen must be positive, got %d", seqLen)
 	}
 
-	// Every stream needs span ids plus one lookahead for the final target.
 	span := (len(ids) - 1) / batch
 	if span < seqLen {
 		return nil, fmt.Errorf("data: %d ids cannot feed batch %d at seqLen %d (need at least %d)",

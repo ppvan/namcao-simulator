@@ -46,7 +46,7 @@ func LossAndGrad(logits []core.Mat, ys [][]int) (loss float32, dLogits []core.Ma
 	ce := core.CrossEntropy()
 	dLogits = make([]core.Mat, T)
 	scale := 1.0 / float32(T)
-	target := core.NewZeroMat(batch, 1) // refilled per step, read immediately
+	target := core.NewZeroMat(batch, 1)
 
 	var total float32
 	for t, y := range logits {
@@ -129,9 +129,7 @@ func (m *CharRNN) FitStep(xs, ys [][]int, s0 State, opt core.Optimizer, clipNorm
 
 	grads, finite := ClipGrads(grads, clipNorm)
 	if !finite || math.IsNaN(float64(loss)) || math.IsInf(float64(loss), 0) {
-		// Leave the parameters untouched and hand the caller a fresh state:
-		// whatever produced this is in the carried activations, not the
-		// weights, and the weights are still good.
+
 		return loss, m.InitState(len(xs[0])), ErrNonFiniteGrad
 	}
 
@@ -194,17 +192,10 @@ type TrainConfig struct {
 	Batch  int
 	SeqLen int
 
-	// Epochs is the training budget: passes over the corpus. A step consumes
-	// Batch*SeqLen characters, so a raw step count means different amounts of
-	// training at different batch sizes; epochs do not. Changing Batch changes
-	// how fast the run goes, not how much training happens.
 	Epochs float64
 
 	ClipNorm float32
 
-	// LogEvery and EvalEvery are intervals in epochs, for the same reason.
-	// Zero selects the default (ten log lines per epoch, one eval per epoch);
-	// negative disables.
 	LogEvery  float64
 	EvalEvery float64
 
@@ -262,15 +253,12 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 	skipped, consecutive := 0, 0
 	lastLog := time.Now()
 
-	// A handful of skipped steps is survivable; a run of them means the
-	// parameters themselves are already NaN and nothing will recover them.
 	const maxConsecutiveSkips = 5
 
 	for step := 1; step <= steps; step++ {
 		xs, ys, wrapped := tb.Next()
 		if wrapped {
-			// every stream jumped back to the head of its chunk, so the
-			// carried hidden state no longer describes the current context
+
 			s = m.InitState(batch)
 		}
 
@@ -297,8 +285,7 @@ func (m *CharRNN) Train(train, val []int, opt core.Optimizer, cfg TrainConfig) e
 		seen++
 
 		if logEvery > 0 && step%logEvery == 0 && seen > 0 {
-			// chars/s is the only throughput number comparable across batch
-			// sizes; steps/s is not.
+
 			cps := float64(seen*batch*cfg.SeqLen) / time.Since(lastLog).Seconds()
 			fmt.Printf("step %d (epoch %.2f): train loss %.4f | %.0f chars/s\n",
 				step, float64(step)/float64(perEpoch), running/float32(seen), cps)

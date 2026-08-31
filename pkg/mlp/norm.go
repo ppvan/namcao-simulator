@@ -5,8 +5,8 @@ import (
 )
 
 type BatchNorm struct {
-	gamma core.Mat // 1 x d
-	beta  core.Mat // 1 x d
+	gamma core.Mat
+	beta  core.Mat
 }
 
 const epsilon = 0.001
@@ -31,29 +31,22 @@ func (l *BatchNorm) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
 	one := core.NewZeroMat(x.Rows, 1).Apply(func(float32) float32 { return 1 })
 	oneT := one.Transpose()
 
-	// mean: 1 x d
 	mean := oneT.Dot(x).Scale(1 / float32(x.Rows))
 
-	// broadcast mean
 	meanBatch := one.Dot(mean)
 
-	// centered input
 	xCentered := x.Sub(meanBatch)
 
-	// variance: 1 x d
 	variance := oneT.
 		Dot(xCentered.Apply(func(v float32) float32 { return v * v })).
 		Scale(1 / float32(x.Rows))
 
-	// invStd: 1 x d  <-- DO NOT broadcast here
 	invStd := variance.Apply(func(v float32) float32 {
 		return 1.0 / core.FastSqrt32(v+epsilon)
 	})
 
-	// Broadcast only when needed
 	invStdBatch := one.Dot(invStd)
 
-	// normalized input
 	xHat := xCentered.Hadamard(invStdBatch)
 
 	gammaBatch := one.Dot(l.gamma)
@@ -65,7 +58,7 @@ func (l *BatchNorm) Forward(x core.Mat) (out core.Mat, cache core.Cache) {
 		input:     x,
 		xHat:      xHat,
 		xCentered: xCentered,
-		invStd:    invStd, // <-- store 1 x d
+		invStd:    invStd,
 	}
 }
 
@@ -86,7 +79,7 @@ func (l *BatchNorm) Backward(cache core.Cache, dOut core.Mat) (dIn core.Mat, gra
 		Hadamard(invStd3).
 		Scale(-0.5)
 
-	invStdBatch := one.Dot(c.invStd) // broadcast 1 x d -> N x d
+	invStdBatch := one.Dot(c.invStd)
 	term1 := dXHat.Hadamard(invStdBatch)
 
 	dMean := oneT.
